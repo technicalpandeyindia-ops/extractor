@@ -81,12 +81,17 @@ async def fetch_appx_html_to_json(session: aiohttp.ClientSession, url: str, head
     async with SEMAPHORE:
         for attempt in range(3):
             try:
+                timeout = aiohttp.ClientTimeout(total=30)
                 if data:
-                    # Appx API expects JSON body, NOT form-encoded data
-                    async with session.post(url, headers=headers, json=data) as response:
+                    # Non-login POST endpoints expect JSON body
+                    async with session.post(url, headers=headers, json=data, timeout=timeout) as response:
+                        if response.status not in (200, 201):
+                            logging.warning(f"Appx API non-200: {response.status} @ {url}")
                         text = await response.text()
                 else:
-                    async with session.get(url, headers=headers) as response:
+                    async with session.get(url, headers=headers, timeout=timeout) as response:
+                        if response.status not in (200, 201):
+                            logging.warning(f"Appx API non-200: {response.status} @ {url}")
                         text = await response.text()
 
                 try:
@@ -266,7 +271,8 @@ async def login_appx_user(session: aiohttp.ClientSession, bot: Client, m: Messag
 
     await editable.edit(f"🔑 **Authenticating with `{app_name}` servers...**")
 
-    headers = {
+    # Appx login endpoints use form-encoded POST (NOT JSON)
+    form_headers = {
         "Client-Service": "Appx",
         "Auth-Key": "appxapi",
         "source": "website",
@@ -277,38 +283,126 @@ async def login_appx_user(session: aiohttp.ClientSession, bot: Client, m: Messag
     login_candidates = [
         f"{api}/post/userlogin",
         f"{api}/post/userlogin_v2",
-        f"{api}/post/login"
+        f"{api}/post/login",
+        f"{api}/post/userloginv2",
+        f"{api}/post/user/login",
     ]
 
     payloads = [
         {"email": mobile, "password": password},
         {"phone": mobile, "password": password},
         {"mobile": mobile, "password": password},
-        {"username": mobile, "password": password}
+        {"username": mobile, "password": password},
+        {"user": mobile, "pass": password},
     ]
 
+    # All token field names Appx APIs have ever used across versions
+    TOKEN_FIELDS = [
+        "token", "jwt_token", "user_token", "authorization",
+        "accessToken", "access_token", "jwtToken", "bearerToken",
+        "bearer_token", "authToken", "auth_token", "userToken",
+        "jwt", "key", "sessionToken", "session_token",
+    ]
+
+    def _extract_token_from_response(res: dict) -> str:
+        """Exhaustively search the full response tree for any token field."""
+        if not isinstance(res, dict):
+            return ""
+
+        # 1. Root level
+        for field in TOKEN_FIELDS:
+            val = res.get(field)
+            if val and isinstance(val, str) and len(val) > 10:
+                return val
+
+        # 2. Inside res["data"] (dict)
+        inner = res.get("data")
+        if isinstance(inner, dict):
+            for field in TOKEN_FIELDS:
+                val = inner.get(field)
+                if val and isinstance(val, str) and len(val) > 10:
+                    return val
+            # 3. Nested res["data"]["data"]
+            inner2 = inner.get("data")
+            if isinstance(inner2, dict):
+                for field in TOKEN_FIELDS:
+                    val = inner2.get(field)
+                    if val and isinstance(val, str) and len(val) > 10:
+                        return val
+
+        # 4. Inside res["result"] or res["user"] or res["userInfo"]
+        for wrapper in ["result", "user", "userInfo", "userData", "response"]:
+            w = res.get(wrapper)
+            if isinstance(w, dict):
+                for field in TOKEN_FIELDS:
+                    val = w.get(field)
+                    if val and isinstance(val, str) and len(val) > 10:
+                        return val
+
+        return ""
+
     res = None
+    token = ""
     for login_url in login_candidates:
-        for data in payloads:
+        for payload in payloads:
             try:
-                res = await fetch_appx_html_to_json(session, login_url, headers=headers, data=data)
-                if res and (res.get("status") == 200 or res.get("data")):
-                    break
-            except Exception:
-                pass
-        if res and (res.get("status") == 200 or res.get("data")):
+                # Use raw aiohttp form POST — bypass fetch_appx_html_to_json which sends JSON
+                import urllib.parse
+                form_body = urllib.parse.urlencode(payload)
+                async with session.post(
+                    login_url,
+                    headers=form_headers,
+                    data=form_body,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as resp:
+                    text = await resp.text()
+                    try:
+                        import json as _json
+                        res = _json.loads(text)
+                    except Exception:
+                        import re as _re
+                        m_ = _re.search(r'\{', text)
+                        if m_:
+                            try:
+                                res = _json.loads(text[m_.start():])
+                            except Exception:
+                                res = None
+
+                if res:
+                    token = _extract_token_from_response(res)
+                    if token:
+                        break
+
+                    # Login returned data but no token — check status
+                    status_ok = (
+                        res.get("status") in (200, 1, True, "success", "ok") or
+                        res.get("success") in (True, 1, "true") or
+                        res.get("data") is not None
+                    )
+                    if status_ok:
+                        # Got a success response but no token yet — try next payload
+                        continue
+
+            except Exception as e:
+                logging.warning(f"Login attempt failed [{login_url}]: {e}")
+                continue
+
+        if token:
             break
 
-    if not res or (res.get("status") != 200 and not res.get("data")):
-        msg = res.get("message", "Invalid credentials or login endpoint mismatch.") if res else "No response from server. Check API URL or mobile/password."
-        await editable.edit(f"**Login Failed! ❌**\n`Reason: {msg}`")
+    if not res:
+        await editable.edit("**Login Failed! ❌**\n`No response from server. Check API URL or mobile/password.`")
         return None, None, None
 
-    data = res.get("data", {}) if isinstance(res.get("data"), dict) else {}
-    token = data.get("token") or data.get("jwt_token") or data.get("user_token") or data.get("authorization")
-
     if not token:
-        await editable.edit("**Login succeeded, but authorization token was missing in response! ❌**")
+        # Show the raw response so baby can debug
+        import json as _json
+        raw_preview = _json.dumps(res, indent=2)[:800]
+        await editable.edit(
+            f"**Login succeeded, but token not found in response! ❌**\n\n"
+            f"**Raw API response (debug):**\n`{raw_preview}`\n\n"
+            f"_If you see the token above, copy it and use **Direct Token** login instead._"
+        )
         return None, None, None
 
     token_msg = (
