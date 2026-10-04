@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import os
+import sys
 import threading
+import time
 
 # Initialize asyncio event loop for Python 3.10+ / 3.12+ / 3.14+ compatibility
 try:
@@ -61,10 +63,15 @@ logging.basicConfig(
 def run_web():
     port = int(os.environ.get("PORT", 8080))
     start_time = time.time()
+    logging.info(f"Starting KeepAlive Web Server on 0.0.0.0:{port}...")
     
     try:
         from flask import Flask, jsonify
         app = Flask(__name__)
+
+        # Disable werkzeug access logs to keep terminal clean
+        log = logging.getLogger('werkzeug')
+        log.setLevel(logging.ERROR)
 
         @app.route("/")
         def health():
@@ -83,9 +90,10 @@ def run_web():
         def ping():
             return "pong", 200
 
-        app.run(host="0.0.0.0", port=port)
+        logging.info(f"Flask Web Server successfully bound to port {port}")
+        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     except Exception as e:
-        logging.info(f"Flask runner notice: {e}")
+        logging.error(f"Flask runner error: {e}, falling back to builtin http.server")
         import http.server
         import socketserver
 
@@ -100,18 +108,19 @@ def run_web():
                 pass
 
         try:
-            with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
+            socketserver.TCPServer.allow_reuse_address = True
+            with socketserver.TCPServer(("0.0.0.0", port), HealthCheckHandler) as httpd:
+                logging.info(f"Built-in HTTP server listening on 0.0.0.0:{port}")
                 httpd.serve_forever()
         except Exception as server_err:
-            logging.error(f"Health server error: {server_err}")
+            logging.error(f"Critical Web server error: {server_err}")
 
 def run_self_pinger():
     """Pings own service URL periodically to prevent Render / Railway free tier sleep."""
-    import time
     import urllib.request
     
     # Wait for web server to spin up
-    time.sleep(10)
+    time.sleep(15)
     
     app_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("RAILWAY_STATIC_URL") or os.environ.get("APP_URL")
     if app_url:
