@@ -258,48 +258,59 @@ async def fetch_appx_video_id_details_v2(session: aiohttp.ClientSession, api: st
             data = res.get('data')
             Title = data.get("Title", f"Video {video_id}").strip()
             
+            # 1. Fetch DRM MPD / CloudFront stream
+            drm_url = None
+            res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?videoid={video_id}&folder_wise_course={folder_wise_course}", headers)
+            if not res_drm or res_drm.get('status') != 200:
+                res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?videoid={video_id}&folder_wise_course={folder_wise_course}", headers_noauth)
+            
+            if res_drm and res_drm.get('data'):
+                drm_data = res_drm.get('data', [])
+                if isinstance(drm_data, list):
+                    for item in drm_data:
+                        if not isinstance(item, dict):
+                            continue
+                        for field in ['path', 'url', 'videoUrl', 'hlsUrl', 'mpdUrl', 'streamUrl', 'mediaUrl', 'downloadUrl', 'fileUrl', 'link', 'src']:
+                            val = item.get(field)
+                            if val:
+                                dec = appx_decrypt(str(val))
+                                if dec and (dec.startswith('http') or dec.startswith('//')):
+                                    drm_url = f"https:{dec}" if dec.startswith('//') else dec
+                                    break
+                        if drm_url:
+                            break
+
+            # 2. Check download_links array
+            dl_url = None
+            if data.get('download_links') and isinstance(data['download_links'], list):
+                for dl in data['download_links']:
+                    if isinstance(dl, dict):
+                        path = dl.get('path') or dl.get('url')
+                        if path:
+                            dec = appx_decrypt(str(path))
+                            if dec and (dec.startswith('http') or dec.startswith('//')):
+                                dl_url = f"https:{dec}" if dec.startswith('//') else dec
+                                break
+
+            # 3. Check recording_hls, download_link, and direct fields
             direct_video_url = (
-                data.get('video_url') or data.get('videoUrl') or data.get('hls_url')
-                or data.get('hlsUrl') or data.get('stream_url') or data.get('streamUrl')
-                or data.get('media_url') or data.get('mediaUrl') or data.get('mpd_url')
-                or data.get('mpdUrl') or data.get('download_url') or data.get('downloadUrl')
-                or data.get('url') or data.get('file_url') or data.get('fileUrl')
-                or data.get('source_url') or data.get('sourceUrl') or data.get('path')
-                or data.get('link') or data.get('src') or data.get('video_link') or data.get('videoLink') or ""
+                drm_url or dl_url
+                or (appx_decrypt(str(data.get('recording_hls', ''))) if data.get('recording_hls') else None)
+                or (appx_decrypt(str(data.get('download_link', ''))) if data.get('download_link') else None)
+                or (appx_decrypt(str(data.get('video_url', ''))) if data.get('video_url') else None)
+                or (appx_decrypt(str(data.get('videoUrl', ''))) if data.get('videoUrl') else None)
+                or (appx_decrypt(str(data.get('hls_url', ''))) if data.get('hls_url') else None)
+                or (appx_decrypt(str(data.get('stream_url', ''))) if data.get('stream_url') else None)
+                or (appx_decrypt(str(data.get('media_url', ''))) if data.get('media_url') else None)
+                or (appx_decrypt(str(data.get('mpd_url', ''))) if data.get('mpd_url') else None)
+                or (appx_decrypt(str(data.get('url', ''))) if data.get('url') else None)
+                or (appx_decrypt(str(data.get('file_url', ''))) if data.get('file_url') else None)
+                or ""
             )
             
             if direct_video_url:
                 output.append(f"{Title}:{clean_appx_url(direct_video_url)}\n")
-            else:
-                res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?videoid={video_id}&folder_wise_course={folder_wise_course}", headers)
-                if not res_drm or res_drm.get('status') != 200:
-                    res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?videoid={video_id}&folder_wise_course={folder_wise_course}", headers_noauth)
-                
-                if res_drm:
-                    drm_data = res_drm.get('data', [])
-                    if drm_data and isinstance(drm_data, list) and len(drm_data) > 0:
-                        path = appx_decrypt(drm_data[0].get("path", "")) if drm_data[0].get("path") else None
-                        if path:
-                            output.append(f"{Title}:{clean_appx_url(path)}\n")
-                    
-                    if not output and drm_data and isinstance(drm_data, list):
-                        for item in drm_data:
-                            for field in ['path', 'url', 'videoUrl', 'hlsUrl', 'mpdUrl', 'streamUrl', 'mediaUrl', 'downloadUrl', 'fileUrl', 'link', 'src']:
-                                val = item.get(field)
-                                if val:
-                                    try:
-                                        decrypted = appx_decrypt(val) if val else None
-                                        if decrypted and (decrypted.startswith('http') or decrypted.startswith('//')):
-                                            if decrypted.startswith('//'):
-                                                decrypted = f"https:{decrypted}"
-                                            output.append(f"{Title}:{clean_appx_url(decrypted)}\n")
-                                            break
-                                    except Exception:
-                                        if val.startswith('http') or val.startswith('//'):
-                                            if val.startswith('//'):
-                                                val = f"https:{val}"
-                                            output.append(f"{Title}:{clean_appx_url(val)}\n")
-                                            break
+
             
             pdf_link = appx_decrypt(data.get("pdf_link", "")) if data.get("pdf_link", "") and appx_decrypt(data.get("pdf_link", "")).endswith(".pdf") else None
             if pdf_link:
@@ -400,27 +411,8 @@ async def process_folder_wise_course_0(session: aiohttp.ClientSession, api: str,
                                     all_outputs.append(f"{Title}:{clean_appx_url(thumbnail)}\n")
                                     
                             elif mat_type == "VIDEO":
-                                direct_video_url = (
-                                    item.get('video_url') or item.get('videoUrl') or item.get('hls_url')
-                                    or item.get('hlsUrl') or item.get('stream_url') or item.get('streamUrl')
-                                    or item.get('media_url') or item.get('mediaUrl') or item.get('mpd_url')
-                                    or item.get('mpdUrl') or item.get('download_url') or item.get('downloadUrl')
-                                    or item.get('url') or item.get('file_url') or item.get('fileUrl')
-                                    or item.get('video_link') or item.get('videoLink') or item.get('source_url')
-                                    or item.get('sourceUrl') or item.get('path') or item.get('link') or item.get('src')
-                                )
-                                if not direct_video_url:
-                                    direct_video_url = (
-                                        appx_decrypt(item.get("pdf_link", "")) if item.get("pdf_link") and not appx_decrypt(item.get("pdf_link", "")).endswith(".pdf") else None
-                                        or appx_decrypt(item.get("pdf_link2", "")) if item.get("pdf_link2") and not appx_decrypt(item.get("pdf_link2", "")).endswith(".pdf") else None
-                                        or appx_decrypt(item.get("file_link", "")) if item.get("file_link") else None
-                                    )
-                                
-                                if direct_video_url:
-                                    all_outputs.append(f"{Title}:{clean_appx_url(direct_video_url)}\n")
-                                else:
-                                    if selected_batch_id is not None and video_id is not None:
-                                        tasks.append(fetch_appx_video_id_details_v3(session, api, selected_batch_id, str(video_id), str(ytFlag), headers, user_id))
+                                if selected_batch_id is not None and video_id is not None:
+                                    tasks.append(fetch_appx_video_id_details_v3(session, api, selected_batch_id, str(video_id), str(ytFlag), headers, user_id))
 
     if tasks:
         results = await asyncio.gather(*tasks)
@@ -467,28 +459,12 @@ async def process_folder_wise_course_1(session: aiohttp.ClientSession, api: str,
                     all_outputs.append(f"{Title}:{clean_appx_url(thumbnail)}\n")
                    
             elif mat_type == "VIDEO":
-                direct_video_url = (
-                    item.get('video_url') or item.get('videoUrl') or item.get('hls_url')
-                    or item.get('hlsUrl') or item.get('stream_url') or item.get('streamUrl')
-                    or item.get('media_url') or item.get('mediaUrl') or item.get('mpd_url')
-                    or item.get('mpdUrl') or item.get('download_url') or item.get('downloadUrl')
-                    or item.get('url') or item.get('file_url') or item.get('fileUrl')
-                    or item.get('video_link') or item.get('videoLink') or item.get('source_url')
-                    or item.get('sourceUrl') or item.get('path') or item.get('link') or item.get('src')
-                )
-                if not direct_video_url:
-                    direct_video_url = (
-                        appx_decrypt(item.get("pdf_link", "")) if item.get("pdf_link") and not appx_decrypt(item.get("pdf_link", "")).endswith(".pdf") else None
-                        or appx_decrypt(item.get("pdf_link2", "")) if item.get("pdf_link2") and not appx_decrypt(item.get("pdf_link2", "")).endswith(".pdf") else None
-                        or appx_decrypt(item.get("file_link", "")) if item.get("file_link") else None
-                    )
-                if direct_video_url:
-                    all_outputs.append(f"{Title}:{clean_appx_url(direct_video_url)}\n")
-                else:
+                if selected_batch_id is not None and video_id is not None:
                     tasks.append(fetch_appx_video_id_details_v2(session, api, selected_batch_id, str(video_id), str(ytFlag), headers, 1, user_id))
 
             elif mat_type == "FOLDER":
                 tasks.append(fetch_appx_folder_contents_v2(session, api, selected_batch_id, str(item.get("id")), headers, 1, user_id))
+
 
     if tasks:
         results = await asyncio.gather(*tasks)
