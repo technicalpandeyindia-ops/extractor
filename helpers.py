@@ -86,15 +86,34 @@ async def ask_user(bot: Client, m: Message, editable: Message, text: str, user_i
         return None
 
 def clean_appx_url(url: str) -> str:
-    """Normalizes Appx / Classx CDN URLs and strips expired CloudFront signatures."""
+    """Normalizes Appx / Classx CDN URLs, converts live stream IDs to VOD playlist_eof, and strips expired signatures."""
     if not url:
         return ""
     url = str(url).strip()
-    if "appx.co.in" in url:
+    
+    # Handle static assets & PDF rewrites
+    if "appx.co.in" in url and ("subject/" in url or "paid_course" in url or "image/" in url or url.endswith(".pdf")):
         url = re.sub(r"https?://[^/]+\.appx\.co\.in", "https://appx-content-v2.classx.co.in", url)
         if "?" in url and any(param in url for param in ("URLPrefix=", "Expires=", "KeyName=", "Signature=")):
             url = url.split("?")[0]
+            
+    # Handle vodclasses & live stream conversions
+    if "liveclasses" in url and "playlist_eof.m3u8" not in url:
+        # Check if stream ID T_\d+ exists
+        match = re.search(r'(T_\d+)', url)
+        if match:
+            stream_id = match.group(1)
+            # If expired live stream query params present, transform to permanent vodclasses playlist_eof
+            if "starttime_epoch" in url or "timeshift=" in url:
+                url = f"https://vodclasses.classx.co.in/live/{stream_id}/playlist_eof.m3u8"
+                
+    if "vodclasses.classx.co.in" in url:
+        # Strip query parameters from vodclasses playlist_eof for clean playback
+        if "?" in url:
+            url = url.split("?")[0]
+
     return url
+
 
 def extract_url_from_video_details(item: Dict) -> str:
     if not isinstance(item, dict):
