@@ -108,9 +108,10 @@ def sanitize_filename(name: str) -> str:
 async def download_file_http(url: str, output_path: str, editable: Message, title: str) -> bool:
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        async with aiohttp.ClientSession(headers=headers) as session:
+        conn = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(headers=headers, connector=conn) as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=600)) as resp:
                 if resp.status != 200:
                     logger.warning(f"HTTP {resp.status} downloading {url}")
@@ -133,7 +134,7 @@ async def download_file_http(url: str, output_path: str, editable: Message, titl
                             speed = downloaded / (now - start_time + 0.001)
                             try:
                                 await editable.edit(
-                                    f"📥 **Downloading PDF:** `{title[:40]}`\n\n"
+                                    f"📥 **Downloading File:** `{title[:40]}`\n\n"
                                     f"📊 **Progress:** `{pct:.1f}%` ({format_bytes(downloaded)} / {format_bytes(total_size) if total_size else '?'})\n"
                                     f"⚡ **Speed:** `{format_bytes(speed)}/s`\n\n"
                                     f"<blockquote>❌ Send `/cancel` to abort.</blockquote>"
@@ -146,57 +147,71 @@ async def download_file_http(url: str, output_path: str, editable: Message, titl
         return False
 
 async def download_video_stream(url: str, output_path: str, editable: Message, title: str) -> bool:
-    """Downloads HLS/M3U8 or MP4 using yt-dlp / ffmpeg / direct stream."""
+    """Downloads HLS/M3U8 or MP4 using yt-dlp / ffmpeg / direct stream with candidate fallbacks."""
     clean_url = clean_appx_url(url)
     
-    # Try yt-dlp first
-    try:
+    candidates = [clean_url]
+    if "?" in clean_url:
+        candidates.append(clean_url.split("?")[0])
+    if "/480p/" in clean_url:
+        candidates.append(clean_url.replace("/480p/", "/720p/"))
+    if "transcoded-videos-v2" in clean_url:
+        candidates.append(clean_url.replace("transcoded-videos-v2", "transcoded-videos"))
+        
+    for target_url in candidates:
+        # 1. Try yt-dlp
         try:
-            await editable.edit(f"📥 **Downloading Video:** `{title[:40]}`\n⏳ *Initializing stream fetch...*")
-        except Exception:
-            pass
-        
-        cmd = [
-            "yt-dlp",
-            "--no-warnings",
-            "--no-check-certificates",
-            "--concurrent-fragments", "8",
-            "-o", output_path,
-            clean_url
-        ]
-        
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        await proc.communicate()
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            return True
-    except Exception as e:
-        logger.warning(f"yt-dlp download failed: {e}, attempting ffmpeg fallback")
+            try:
+                await editable.edit(f"📥 **Downloading Video:** `{title[:40]}`\n⏳ *Fetching stream...*")
+            except Exception:
+                pass
+            
+            cmd = [
+                "yt-dlp",
+                "--no-warnings",
+                "--no-check-certificates",
+                "--concurrent-fragments", "8",
+                "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "-o", output_path,
+                target_url
+            ]
+            
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            await proc.communicate()
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                return True
+        except Exception as e:
+            logger.warning(f"yt-dlp attempt failed: {e}")
 
-    # Fallback to ffmpeg
-    try:
-        cmd_ffmpeg = [
-            "ffmpeg", "-y",
-            "-headers", "User-Agent: Mozilla/5.0\r\n",
-            "-i", clean_url,
-            "-c", "copy",
-            "-bsf:a", "aac_adtstoasc",
-            output_path
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd_ffmpeg,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        await proc.communicate()
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            return True
-    except Exception as e:
-        logger.warning(f"ffmpeg download failed: {e}")
+        # 2. Try ffmpeg
+        try:
+            cmd_ffmpeg = [
+                "ffmpeg", "-y",
+                "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n",
+                "-reconnect", "1",
+                "-reconnect_at_eof", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5",
+                "-i", target_url,
+                "-c", "copy",
+                "-bsf:a", "aac_adtstoasc",
+                output_path
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd_ffmpeg,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                return True
+        except Exception as e:
+            logger.warning(f"ffmpeg attempt failed: {e}")
 
     # Fallback to direct HTTP download if it's an MP4
     if ".mp4" in clean_url or not clean_url.endswith(".m3u8"):
