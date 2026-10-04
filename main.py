@@ -143,6 +143,7 @@ threading.Thread(target=run_self_pinger, daemon=True).start()
 
 bot = Client(
     "techvjbot",
+    in_memory=True,
     api_id=api_id,
     api_hash=api_hash,
     bot_token=bot_token
