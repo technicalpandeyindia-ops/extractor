@@ -212,9 +212,30 @@ async def download_video_stream(url: str, output_path: str, editable: Message, t
                 return True
         except Exception as e:
             logger.warning(f"ffmpeg attempt failed: {e}")
+    # 3. Try Python library yt_dlp
+    try:
+        import yt_dlp
+        for target_url in candidates:
+            def _run_ydl():
+                ydl_opts = {
+                    'outtmpl': output_path,
+                    'format': 'bestvideo+bestaudio/best',
+                    'quiet': True,
+                    'no_warnings': True,
+                    'nocheckcertificate': True,
+                    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([target_url])
+            await asyncio.to_thread(_run_ydl)
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                return True
+    except Exception as e:
+        logger.warning(f"yt_dlp library attempt failed: {e}")
 
-    # Fallback to direct HTTP download if it's an MP4
-    if ".mp4" in clean_url or not clean_url.endswith(".m3u8"):
+    # Fallback to direct HTTP download ONLY if it's explicitly an MP4 file
+    base_url = clean_url.split('?')[0].lower()
+    if base_url.endswith('.mp4') or '.mp4' in base_url:
         return await download_file_http(clean_url, output_path, editable, title)
         
     return False

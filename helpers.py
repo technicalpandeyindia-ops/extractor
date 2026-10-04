@@ -86,11 +86,15 @@ async def ask_user(bot: Client, m: Message, editable: Message, text: str, user_i
         return None
 
 def clean_appx_url(url: str) -> str:
-    """Normalizes Appx / Classx CDN URLs, converts live stream IDs to permanent VOD playlist_eof, and strips expired signatures."""
+    """Normalizes Appx / Classx CDN URLs, converts live stream IDs to permanent VOD playlist_eof, and strips expired signatures and query params."""
     if not url:
         return ""
     url = str(url).strip()
     
+    # Strip ?bitrate= and trailing query parameters from .m3u8 playlists
+    if ".m3u8?" in url:
+        url = url.split("?")[0]
+
     # Handle static assets & PDF rewrites
     if "appx.co.in" in url and ("subject/" in url or "paid_course" in url or "image/" in url or url.endswith(".pdf")):
         url = re.sub(r"https?://[^/]+\.appx\.co\.in", "https://appx-content-v2.classx.co.in", url)
