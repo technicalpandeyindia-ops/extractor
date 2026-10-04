@@ -653,6 +653,15 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
                 except: pass
 
 def register_appxwp_handlers(bot: Client):
+    @bot.on_callback_query(filters.regex("^appxwp$"))
+    async def appx_callback(client: Client, callback_query):
+        user_id = callback_query.from_user.id if callback_query.from_user else 0
+        if not is_authorized(user_id):
+            await callback_query.answer("⛔ Access Denied! You are not authorized.", show_alert=True)
+            return
+        await callback_query.answer()
+        asyncio.create_task(process_appxwp(client, callback_query.message, user_id))
+
     @bot.on_message(filters.command(["three", "appx", "appxwp"]) & filters.private)
     async def appx_cmd_handler(client: Client, message: Message):
         user_id = message.from_user.id
@@ -660,3 +669,5 @@ def register_appxwp_handlers(bot: Client):
             await message.reply_text("**You are not authorized to use this bot! ❌**")
             return
         await process_appxwp(client, message, user_id)
+
+process_appx = process_appxwp
