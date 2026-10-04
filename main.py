@@ -57,6 +57,7 @@ from helpers import is_authorized
 from one import register_pwwp_handlers
 from two import register_cpwp_handlers
 from three import register_appxwp_handlers
+from downloader import process_batch_downloader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -156,11 +157,11 @@ START_IMAGE = "https://files.catbox.moe/vg3vae.jpg"
 
 START_CAPTION = (
     "<blockquote>\n"
-    "╭━━━ ✦ <b>Zx Extractor</b> ✦ ━━━╮\n\n"
-    "⚡ <b>Your Content. One Extractor.</b>\n"
+    "╭━━━ ✦ <b>Zx Extractor & Downloader</b> ✦ ━━━╮\n\n"
+    "⚡ <b>Your Content. One Platform.</b>\n"
     "🔐 <b>Smart • Reliable • Efficient</b>\n"
-    "📚 <b>PW • Classplus • Appx</b>\n\n"
-    "<i>Select a platform to begin...</i>\n"
+    "📚 <b>PW • Classplus • Appx • Downloader</b>\n\n"
+    "<i>Select a provider or tool below to begin...</i>\n"
     "╰━━━━━━━━━━━━━━━━━━━━╯\n"
     "</blockquote>"
 )
@@ -188,6 +189,12 @@ START_KEYBOARD = InlineKeyboardMarkup([
         InlineKeyboardButton(
             "📒 𝗔𝗽𝗽𝘅 📒",
             callback_data="appxwp"
+        )
+    ],
+    [
+        InlineKeyboardButton(
+            "📥 𝗩𝗶𝗱𝗲𝗼 & 𝗣𝗗𝗙 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱𝗲𝗿 (𝗔𝗽𝗽𝘅 𝗩𝟮) 📥",
+            callback_data="dl_appx_v2"
         )
     ]
 ])
@@ -218,7 +225,7 @@ async def start(client: Client, message: Message):
         except Exception as e2:
             logging.error(f"Failed to send HTML start message: {e2}, sending plain text...")
             await message.reply_text(
-                text="⚡ **Zx Extractor**\n\nSelect a platform below to begin:",
+                text="⚡ **Zx Extractor & Downloader**\n\nSelect an option below to begin:",
                 reply_markup=START_KEYBOARD
             )
 
@@ -230,10 +237,20 @@ async def help_cmd(client: Client, message: Message):
         await message.reply_text("⛔ **Access Denied.**")
         return
     await message.reply_text(
-        "✦ <b>Zx Extractor</b>\n\n"
-        "Use /start to open the extractor menu and select your provider.",
+        "✦ <b>Zx Extractor & Downloader</b>\n\n"
+        "• Use /start to open the extractor and downloader menu.\n"
+        "• Click <b>Video & PDF Downloader (Appx V2)</b> to download and batch-upload extracted links directly to your Telegram chat/channel.",
         parse_mode=ParseMode.HTML
     )
+
+@bot.on_callback_query(filters.regex("^dl_appx_v2$"))
+async def dl_appx_callback(client: Client, callback_query):
+    user_id = callback_query.from_user.id if callback_query.from_user else 0
+    if not is_authorized(user_id):
+        await callback_query.answer("⛔ Access Denied! You are not authorized.", show_alert=True)
+        return
+    await callback_query.answer()
+    asyncio.create_task(process_batch_downloader(client, callback_query.message, user_id))
 
 register_pwwp_handlers(bot)
 register_cpwp_handlers(bot)
