@@ -511,129 +511,137 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
                 else:
                     api, selected_app_name = await resolve_api_and_app_name(bot, m, editable, first_input, user_id)
 
-            if not api or not selected_app_name:
-                return
-
             extracted_jwt_userid = extract_user_id_from_jwt(token) if token else "0"
+            formatted_token = f"{token}" if token and not token.startswith("Bearer ") else token
 
             headers = {
                 "Client-Service": "Appx",
                 "Auth-Key": "appxapi",
                 "source": "website",
-                "User-ID": str(extracted_jwt_userid)
             }
             if token:
-                headers["Authorization"] = token
+                headers['Authorization'] = formatted_token
+                headers['User-ID'] = str(extracted_jwt_userid)
 
-            course_type = await prompt_user(
-                bot, m, editable,
-                f"**Connected to:** `{selected_app_name}`\n\n"
-                f"Select Course Extraction Mode:\n\n"
-                f"**1. 📚 My / Purchased Courses**\n"
-                f"**2. 🌐 All / Public Courses (No Login Required)**",
-                user_id
-            )
+            try: await editable.delete()
+            except: pass
+            editable = await m.reply_text("**Fetching Available Courses... 🔍**")
 
-            if course_type == "1":
-                if not token:
-                    token = await prompt_user(bot, m, editable, "**Send Token for Purchased Courses:**", user_id)
-                    extracted_jwt_userid = extract_user_id_from_jwt(token)
-                    headers["Authorization"] = token
-                    headers["User-ID"] = str(extracted_jwt_userid)
-                api_endpoint = f"{api}/get/mycourse"
-            else:
-                api_endpoint = f"{api}/get/allcourse2"
-
-            await editable.edit("🔍 **Fetching courses list... ⏳**")
-            
-            my_courses = []
-            if token:
-                for ep in ["mycourse", "my_course_list", "get_my_course_new", "mycoursev2"]:
-                    res_my = await fetch_appx_html_to_json(session, f"{api}/get/{ep}", headers)
-                    if res_my and res_my.get("data") and isinstance(res_my["data"], list) and len(res_my["data"]) > 0:
-                        my_courses = res_my["data"]
-                        break
-
-            res_list1 = await fetch_appx_html_to_json(session, f"{api}/get/courselist", headers)
-            res_list2 = await fetch_appx_html_to_json(session, f"{api}/get/courselistnewv2", headers)
+            res1 = await fetch_appx_html_to_json(session, f"{api}/get/courselist", headers)
+            res2 = await fetch_appx_html_to_json(session, f"{api}/get/courselistnewv2", headers)
             res_all = await fetch_appx_html_to_json(session, f"{api}/get/allcourse2", headers)
 
-            c1 = res_list1.get("data", []) if res_list1 and isinstance(res_list1.get("data"), list) else []
-            c2 = res_list2.get("data", []) if res_list2 and isinstance(res_list2.get("data"), list) else []
-            c3 = res_all.get("data", []) if res_all and isinstance(res_all.get("data"), list) else []
+            courses1 = res1.get("data", []) if res1 and isinstance(res1.get("data"), list) else []
+            courses2 = res2.get("data", []) if res2 and isinstance(res2.get("data"), list) else []
+            courses_all = res_all.get("data", []) if res_all and isinstance(res_all.get("data"), list) else []
+            courses3 = []
 
-            if course_type == "1" and my_courses:
-                combined = my_courses
-            else:
-                combined = my_courses + c1 + c2 + c3
+            if token:
+                for ep in ["mycourse", "my_course_list", "get_my_course_new", "mycoursev2"]:
+                    res3 = await fetch_appx_html_to_json(session, f"{api}/get/{ep}", headers)
+                    if res3 and res3.get("data") and isinstance(res3["data"], list) and len(res3["data"]) > 0:
+                        courses3 = res3["data"]
+                        break
 
-            # Deduplicate by id
-            course_data = []
+            raw_courses = courses3 + courses1 + courses2 + courses_all
+            
+            # Deduplicate by course id
+            courses = []
             seen_ids = set()
-            for c in combined:
+            for c in raw_courses:
                 if isinstance(c, dict):
-                    cid = str(c.get("id") or c.get("course_id") or "")
+                    cid = str(c.get('id') or c.get('course_id') or "")
                     if cid and cid not in seen_ids:
                         seen_ids.add(cid)
-                        course_data.append(c)
+                        courses.append(c)
 
-            if not course_data:
-                await editable.edit("**No courses found or Token/API expired! ❌**\n*Make sure you selected the correct App and entered a valid token.*")
+            if not courses:
+                await editable.edit("**Did not find any course! ❌\nCheck if token is expired or if the App API endpoint is valid.**")
                 return
 
+            total = len(courses)
+            if total > 40:
+                text = ""
+                for cnt, course in enumerate(courses):
+                    text += f"{cnt + 1}. {course.get('course_name', 'Unnamed Course')} 💵₹{course.get('price', '0')}\n"
 
-            courses_text = f"**Available Courses for {selected_app_name}:**\n\n"
-            for cnt, item in enumerate(course_data):
-                c_name = item.get("course_name") or item.get("name") or "Unnamed Course"
-                c_id = item.get("id") or item.get("course_id")
-                courses_text += f"<blockquote>**{cnt + 1}.** `{c_name}` (ID: `{c_id}`)</blockquote>\n"
+                course_details_file = f"{user_id}_paid_course_details.txt"
+                with open(course_details_file, 'w', encoding='utf-8') as f:
+                    f.write(text)
 
-            selection_idx = await prompt_user(bot, m, editable, f"{courses_text}\n**Send Course Index Number to Extract:**", user_id)
-            if not selection_idx.isdigit() or int(selection_idx) < 1 or int(selection_idx) > len(course_data):
-                await editable.edit("**Invalid course selection! ❌**")
-                return
+                caption = f"**App Name:** `{selected_app_name}`\n**Total Courses:** `{total}`"
+                try:
+                    with open(course_details_file, 'rb') as f:
+                        await m.reply_document(document=f, caption=caption, file_name="course_details.txt")
+                finally:
+                    if os.path.exists(course_details_file):
+                        try: os.remove(course_details_file)
+                        except: pass
 
-            selected_course = course_data[int(selection_idx) - 1]
-            selected_batch_id = str(selected_course.get("id") or selected_course.get("course_id"))
-            selected_course_name = selected_course.get("course_name") or selected_course.get("name") or "Course"
-            folder_wise_course = selected_course.get("folder_wise_course", 0)
-
-            clean_file_name = re.sub(r'[\\/*?:"<>|]', "", selected_course_name).strip().replace(" ", "_")
-            if not clean_file_name:
-                clean_file_name = f"Appx_Course_{selected_batch_id}"
-
-            await editable.edit(f"⏳ **Extracting contents for:** `{selected_course_name}`\n*Resolving video streams & notes...*")
-            start_time = time.time()
-
-            if str(folder_wise_course) == "1":
-                outputs = await process_folder_wise_course_1(session, api, selected_batch_id, headers, user_id)
+                selection_course = await prompt_user(bot, m, editable, "**Send index number from the course details file just sent:**", user_id)
             else:
-                outputs = await process_folder_wise_course_0(session, api, selected_batch_id, headers, user_id)
+                text = ""
+                for cnt, course in enumerate(courses):
+                    text += f"<blockquote>**{cnt + 1}.** `{course.get('course_name', 'Unnamed Course')}`</blockquote>\n"
+                selection_course = await prompt_user(bot, m, editable, f"**Send index number of the course to extract:**\n\n{text}", user_id)
 
-            if not outputs:
-                # Fallback to alternate folder structure if empty
-                if str(folder_wise_course) == "1":
-                    outputs = await process_folder_wise_course_0(session, api, selected_batch_id, headers, user_id)
-                else:
-                    outputs = await process_folder_wise_course_1(session, api, selected_batch_id, headers, user_id)
-
-            if not outputs:
-                await editable.edit("**No lessons, videos, or PDFs found in this course! ❌**")
+            if selection_course.isdigit() and 1 <= int(selection_course) <= len(courses):
+                selected_course = courses[int(selection_course) - 1]
+                selected_batch_id = str(selected_course.get('id') or selected_course.get('course_id'))
+                selected_batch_name = selected_course.get('course_name') or selected_course.get('name') or "Batch"
+                folder_wise_course = selected_course.get("folder_wise_course", "")
+                
+                clean_batch_name = re.sub(r'[\\/*?:"<>|]', "-", selected_batch_name).strip()[:200]
+                clean_file_name = f"{user_id}_{clean_batch_name}"
+            else:
+                await editable.edit("**Invalid Selection Index! ❌**")
                 return
 
-            txt_file_path = f"{clean_file_name}.txt"
-            with open(txt_file_path, "w", encoding="utf-8") as f:
-                for line in outputs:
-                    f.write(line)
+            start_time = time.time()
+            await update_status_card(editable, f"Extracting: {selected_batch_name}", 0, 100, start_time, "Initializing extraction...")
 
-            elapsed_str = format_time(time.time() - start_time)
-            await send_extracted_text_file(
-                bot, m, editable, txt_file_path,
-                app_name=f"Appx - {selected_app_name}",
-                batch_name=selected_course_name,
-                total_links=len(outputs),
-                elapsed_time=elapsed_str
-            )
+            extraction_headers = {
+                "Client-Service": "Appx",
+                "Auth-Key": "appxapi",
+                "source": "website",
+            }
+            if token:
+                extraction_headers["Authorization"] = formatted_token
+                extraction_headers["User-ID"] = str(extracted_jwt_userid)
+
+            all_outputs = []
+
+            if str(folder_wise_course) == "0":
+                await update_status_card(editable, f"Extracting: {selected_batch_name}", 20, 100, start_time, "Extracting live/subject course items...")
+                all_outputs = await process_folder_wise_course_0(session, api, selected_batch_id, extraction_headers, user_id)
+            elif str(folder_wise_course) == "1":
+                await update_status_card(editable, f"Extracting: {selected_batch_name}", 20, 100, start_time, "Extracting folder-wise structure...")
+                all_outputs = await process_folder_wise_course_1(session, api, selected_batch_id, extraction_headers, user_id)
+            else:
+                await update_status_card(editable, f"Extracting: {selected_batch_name}", 10, 100, start_time, "Extracting method 1...")
+                outputs_0 = await process_folder_wise_course_0(session, api, selected_batch_id, extraction_headers, user_id)
+                all_outputs.extend(outputs_0)
+                await update_status_card(editable, f"Extracting: {selected_batch_name}", 50, 100, start_time, "Extracting method 2...")
+                outputs_1 = await process_folder_wise_course_1(session, api, selected_batch_id, extraction_headers, user_id)
+                all_outputs.extend(outputs_1)
+
+            if all_outputs:
+                output_txt_path = f"{clean_file_name}.txt"
+                with open(output_txt_path, 'w', encoding='utf-8') as f:
+                    for output_line in all_outputs:
+                        f.write(output_line)
+
+                time_taken = format_time(time.time() - start_time)
+                await send_extracted_text_file(
+                    bot, m, editable, output_txt_path,
+                    app_name=f"Appx - {selected_app_name}",
+                    batch_name=selected_batch_name,
+                    total_links=len(all_outputs),
+                    elapsed_time=time_taken
+                )
+            else:
+                await editable.edit("**Didn't Find Any Content In The Course! ❌**")
+
 
     except ProcessCancelledException:
         pass
