@@ -130,35 +130,56 @@ def extract_user_id_from_jwt(token: str) -> str:
         logging.warning(f"Failed to parse user-id from token: {e}")
     return "0"
 
+BUILTIN_APPX_APIS = [
+    {"name": "Adhyayan Mantra", "api": "https://adhyayanmantraapi.appx.co.in"},
+    {"name": "Adhyayan Mantra Live", "api": "https://adhyayanmantraapi.appx.co.in"},
+    {"name": "Target With Alok", "api": "https://targetwithalokapi.appx.co.in"},
+    {"name": "Khan Global Studies", "api": "https://khanglobalstudiesapi.appx.co.in"},
+    {"name": "Sanskriti IAS", "api": "https://sanskritiiasapi.appx.co.in"},
+    {"name": "Dhyeya IAS", "api": "https://dhyeyaiasapi.appx.co.in"},
+    {"name": "Kavya Classes", "api": "https://kavyaclassesapi.appx.co.in"},
+    {"name": "RWA Rojgar With Ankit", "api": "https://rojgarwithankitapi.appx.co.in"},
+    {"name": "Chandra Institute", "api": "https://chandrainstituteapi.appx.co.in"},
+    {"name": "Utkarsh Classes", "api": "https://utkarshapi.appx.co.in"},
+    {"name": "Paramount Coaching", "api": "https://paramountcoachingapi.appx.co.in"},
+    {"name": "Examपुर ExamPUR", "api": "https://exampurapi.appx.co.in"},
+    {"name": "Winner Institute", "api": "https://winnerinstituteapi.appx.co.in"},
+    {"name": "Careerwill Appx", "api": "https://careerwillapi.appx.co.in"},
+    {"name": "Perfection IAS", "api": "https://perfectioniasapi.appx.co.in"},
+    {"name": "Sachin Academy", "api": "https://sachinacademyapi.appx.co.in"},
+    {"name": "Step Up Academy", "api": "https://stepupacademyapi.appx.co.in"},
+    {"name": "Gyanpeeth", "api": "https://gyanpeethapi.appx.co.in"},
+    {"name": "Mahendras", "api": "https://mahendrasapi.appx.co.in"},
+    {"name": "KD Campus", "api": "https://kdcampusapi.appx.co.in"},
+    {"name": "The Officers Academy", "api": "https://theofficersacademyapi.appx.co.in"},
+    {"name": "Kautilya Classes", "api": "https://kautilyaclassesapi.appx.co.in"}
+]
+
 def find_appx_matching_apis(search_api: List[str], appxapis_file=None) -> List[Dict]:
     matched_apis = []
+    api_data = list(BUILTIN_APPX_APIS)
+
     base_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         appxapis_file,
         os.path.join(base_dir, "threeapis.json"),
-        os.path.join(base_dir, "appxapis.json"),
-        "threeapis.json",
-        "appxapis.json"
+        os.path.join(base_dir, "appxapis.json")
     ]
-    api_data = []
     for candidate in candidates:
         if candidate and os.path.exists(candidate):
             try:
                 with open(candidate, 'r', encoding='utf-8') as f:
-                    api_data = json.load(f)
-                    if api_data:
+                    file_data = json.load(f)
+                    if file_data and isinstance(file_data, list):
+                        api_data.extend(file_data)
                         break
-            except Exception as e:
-                logging.error(f"Error reading appxapis file {candidate}: {e}")
-
-    if not api_data:
-        logging.error("No valid appxapis JSON database found.")
-        return matched_apis
+            except Exception:
+                pass
 
     for item in api_data:
         for term in search_api:
             term = term.strip().lower()
-            if term in item.get("name", "").lower() or term in item.get("api", "").lower():
+            if term and (term in item.get("name", "").lower() or term in item.get("api", "").lower()):
                 matched_apis.append(item)
 
     unique_apis = []
@@ -174,73 +195,116 @@ def find_appx_matching_apis(search_api: List[str], appxapis_file=None) -> List[D
 async def resolve_api_and_app_name(bot: Client, m: Message, editable: Message, raw_input_text: str, user_id: int):
     raw_input_text = raw_input_text.strip()
     
-    if raw_input_text.startswith(("http://", "https://")):
+    # 1. Direct Appx API URL passed
+    if "appx.co.in" in raw_input_text:
         clean_url = raw_input_text.replace("https://", "").replace("http://", "").rstrip("/")
         api_url = f"https://{clean_url}"
-        return api_url, api_url
+        return api_url, clean_url.split(".")[0]
 
+    # 2. Website URL passed (e.g. https://adhyayanmantra.com/ or targetwithalok.in)
+    if raw_input_text.startswith(("http://", "https://")) or ("." in raw_input_text and "/" in raw_input_text):
+        domain_part = re.sub(r'https?://', '', raw_input_text).split('/')[0]
+        base_name = domain_part.split('.')[0].lower()
+        
+        # Check if matching API exists in database
+        matches = find_appx_matching_apis([base_name])
+        if matches:
+            return matches[0]["api"], matches[0]["name"]
+        
+        # Auto-derive Appx standard API endpoint
+        candidate_api = f"https://{base_name}api.appx.co.in"
+        return candidate_api, base_name.capitalize()
+
+    # 3. Name or search terms passed
     search_terms = [term.strip() for term in raw_input_text.split()]
     matches = find_appx_matching_apis(search_terms)
 
     if not matches:
-        await editable.edit("**No matches found! Enter Correct App Starting Word ❌**")
+        # Fallback: Auto-construct from search term (e.g. 'adhyayan mantra' -> 'adhyayanmantraapi.appx.co.in')
+        slug = re.sub(r'[^a-zA-Z0-9]', '', raw_input_text).lower()
+        if slug:
+            candidate_api = f"https://{slug}api.appx.co.in"
+            return candidate_api, raw_input_text.title()
+
+        await editable.edit("**No matches found! Enter Correct App Name or API URL ❌**")
         return None, None
 
-    if len(matches) > 35:
-        matches = matches[:35]
-        truncated_note = "\n\n⚠️ *Too many matches, showing first 35.*"
+    if len(matches) == 1:
+        return matches[0]["api"], matches[0]["name"]
+
+    if len(matches) > 30:
+        matches = matches[:30]
+        truncated_note = "\n\n⚠️ *Showing first 30 matches.*"
     else:
         truncated_note = ""
 
     text = ""
     for cnt, item in enumerate(matches):
-        text += f"<blockquote>**{cnt + 1}.** `{item['name']}:{item['api']}`</blockquote>\n"
+        text += f"<blockquote>**{cnt + 1}.** `{item['name']}`</blockquote>\n"
 
-    selection_text = await prompt_user(bot, m, editable, f"**Select Index Number Of App API:**\n\n{text}{truncated_note}", user_id)
+    selection_text = await prompt_user(bot, m, editable, f"**Select Number of your App:**\n\n{text}{truncated_note}", user_id)
 
     if selection_text.isdigit() and 1 <= int(selection_text) <= len(matches):
         selected_item = matches[int(selection_text) - 1]
         return selected_item['api'], selected_item['name']
     else:
-        await editable.edit("**Error: Wrong Index Number ❌**")
+        await editable.edit("**Error: Invalid Selection ❌**")
         return None, None
 
 async def login_appx_user(session: aiohttp.ClientSession, bot: Client, m: Message, editable: Message, user_id: int):
-    app_input = await prompt_user(bot, m, editable, "**Enter App Name or API URL to login:**", user_id)
+    app_input = await prompt_user(bot, m, editable, "**Enter App Name, Website URL, or API URL:**\n*(e.g. `Adhyayan Mantra` or `https://adhyayanmantraapi.appx.co.in`)*", user_id)
     api, app_name = await resolve_api_and_app_name(bot, m, editable, app_input, user_id)
     if not api or not app_name:
         return None, None, None
 
-    mobile = await prompt_user(bot, m, editable, "**Enter Mobile Number:**", user_id)
+    mobile = await prompt_user(bot, m, editable, "**Enter Registered Mobile Number:**", user_id)
     password = await prompt_user(bot, m, editable, "**Enter Password:**", user_id)
 
-    await editable.edit("🔑 **Authenticating with Appx servers...**")
+    await editable.edit(f"🔑 **Authenticating with `{app_name}` servers...**")
 
     headers = {
         "Client-Service": "Appx",
         "Auth-Key": "appxapi",
         "source": "website",
+        "User-Agent": "okhttp/4.9.0",
         "Content-Type": "application/x-www-form-urlencoded"
     }
 
-    login_url = f"{api}/post/userlogin"
-    login_data = {
-        "email": mobile,
-        "password": password
-    }
+    login_candidates = [
+        f"{api}/post/userlogin",
+        f"{api}/post/userlogin_v2",
+        f"{api}/post/login"
+    ]
 
-    res = await fetch_appx_html_to_json(session, login_url, headers=headers, data=login_data)
+    payloads = [
+        {"email": mobile, "password": password},
+        {"phone": mobile, "password": password},
+        {"mobile": mobile, "password": password},
+        {"username": mobile, "password": password}
+    ]
 
-    if not res or res.get("status") != 200 or not res.get("data"):
-        msg = res.get("message", "Invalid credentials or login API endpoint mismatch.") if res else "No response from server."
+    res = None
+    for login_url in login_candidates:
+        for data in payloads:
+            try:
+                res = await fetch_appx_html_to_json(session, login_url, headers=headers, data=data)
+                if res and (res.get("status") == 200 or res.get("data")):
+                    break
+            except Exception:
+                pass
+        if res and (res.get("status") == 200 or res.get("data")):
+            break
+
+    if not res or (res.get("status") != 200 and not res.get("data")):
+        msg = res.get("message", "Invalid credentials or login endpoint mismatch.") if res else "No response from server. Check API URL or mobile/password."
         await editable.edit(f"**Login Failed! ❌**\n`Reason: {msg}`")
         return None, None, None
 
-    data = res["data"]
-    token = data.get("token") or data.get("jwt_token") or data.get("user_token")
+    data = res.get("data", {}) if isinstance(res.get("data"), dict) else {}
+    token = data.get("token") or data.get("jwt_token") or data.get("user_token") or data.get("authorization")
 
     if not token:
-        await editable.edit("**Login successful, but token could not be found in response! ❌**")
+        await editable.edit("**Login succeeded, but authorization token was missing in response! ❌**")
         return None, None, None
 
     token_msg = (
@@ -248,10 +312,9 @@ async def login_appx_user(session: aiohttp.ClientSession, bot: Client, m: Messag
         f"**App Name:** `{app_name}`\n"
         f"**Mobile:** `{mobile}`\n"
         f"**Token:**\n`{token}`\n\n"
-        f"<blockquote>Tap token to copy it for future use.</blockquote>"
+        f"<blockquote>Tap to copy token for future direct logins.</blockquote>"
     )
     await bot.send_message(chat_id=m.chat.id, text=token_msg)
-
     return api, token, app_name
 
 def extract_appx_item_links(item: Dict[str, Any], api: str) -> List[str]:
