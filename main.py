@@ -191,8 +191,10 @@ START_KEYBOARD = InlineKeyboardMarkup([
 @bot.on_message(filters.command(["start"]))
 async def start(client: Client, message: Message):
     user_id = message.from_user.id if message.from_user else 0
+    logging.info(f"Incoming /start command from user_id: {user_id} (@{message.from_user.username if message.from_user else 'unknown'})")
     if not is_authorized(user_id):
-        await message.reply_text("⛔ **Access Denied:** You are not authorized to use this bot.")
+        logging.warning(f"User {user_id} rejected: Not in authorized users list.")
+        await message.reply_text(f"⛔ **Access Denied:** Your User ID (`{user_id}`) is not authorized to use this bot.")
         return
     try:
         await message.reply_photo(
@@ -201,12 +203,21 @@ async def start(client: Client, message: Message):
             reply_markup=START_KEYBOARD,
             parse_mode=ParseMode.HTML
         )
-    except Exception:
-        await message.reply_text(
-            text=START_CAPTION,
-            reply_markup=START_KEYBOARD,
-            parse_mode=ParseMode.HTML
-        )
+    except Exception as e1:
+        logging.warning(f"Failed to send start photo: {e1}, attempting text-only fallback...")
+        try:
+            await message.reply_text(
+                text=START_CAPTION,
+                reply_markup=START_KEYBOARD,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e2:
+            logging.error(f"Failed to send HTML start message: {e2}, sending plain text...")
+            await message.reply_text(
+                text="⚡ **Zx Extractor**\n\nSelect a platform below to begin:",
+                reply_markup=START_KEYBOARD
+            )
+
 
 @bot.on_message(filters.command(["help"]))
 async def help_cmd(client: Client, message: Message):
