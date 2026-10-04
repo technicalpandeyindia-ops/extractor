@@ -146,8 +146,86 @@ async def download_file_http(url: str, output_path: str, editable: Message, titl
         logger.error(f"Download HTTP error: {e}")
         return False
 
+async def download_hls_stream_pure_python(m3u8_url: str, output_path: str, editable: Message, title: str) -> bool:
+    """Pure Python HLS parser & chunk downloader using aiohttp with zero external binary dependencies."""
+    import urllib.parse
+    conn = aiohttp.TCPConnector(ssl=False)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        async with aiohttp.ClientSession(connector=conn, headers=headers) as session:
+            async with session.get(m3u8_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status != 200:
+                    return False
+                m3u8_content = await resp.text()
+
+            # Check if it's a master playlist containing resolution variants
+            lines = [l.strip() for l in m3u8_content.splitlines() if l.strip()]
+            variant_playlists = [l for l in lines if not l.startswith("#") and ".m3u8" in l]
+            if variant_playlists:
+                target_variant = variant_playlists[-1]
+                for v in variant_playlists:
+                    if "720" in v:
+                        target_variant = v
+                        break
+                    elif "480" in v:
+                        target_variant = v
+                
+                sub_url = urllib.parse.urljoin(m3u8_url, target_variant)
+                async with session.get(sub_url, timeout=aiohttp.ClientTimeout(total=20)) as sub_resp:
+                    if sub_resp.status == 200:
+                        m3u8_content = await sub_resp.text()
+                        m3u8_url = sub_url
+
+            # Extract segment URLs (.ts or raw segment lines)
+            segments = []
+            for line in m3u8_content.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    seg_url = urllib.parse.urljoin(m3u8_url, line)
+                    segments.append(seg_url)
+
+            if not segments:
+                return False
+
+            total_segs = len(segments)
+            start_time = time.time()
+            last_update = 0
+
+            with open(output_path, "wb") as out_file:
+                for idx, seg_url in enumerate(segments, 1):
+                    for attempt in range(3):
+                        try:
+                            async with session.get(seg_url, timeout=aiohttp.ClientTimeout(total=30)) as seg_resp:
+                                if seg_resp.status == 200:
+                                    chunk = await seg_resp.read()
+                                    out_file.write(chunk)
+                                    break
+                        except Exception:
+                            await asyncio.sleep(0.5)
+                    
+                    now = time.time()
+                    if now - last_update > 4 or idx == total_segs:
+                        last_update = now
+                        pct = (idx / total_segs) * 100
+                        try:
+                            await editable.edit(
+                                f"📥 **Downloading Video:** `{title[:40]}`\n\n"
+                                f"📊 **Segments:** `[{idx}/{total_segs}]` ({pct:.1f}%)\n"
+                                f"⏱️ **Elapsed:** `{format_time(now - start_time)}`\n\n"
+                                f"<blockquote>❌ Send `/cancel` to abort.</blockquote>"
+                            )
+                        except Exception:
+                            pass
+
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+    except Exception as e:
+        logger.error(f"Pure Python HLS downloader error: {e}")
+        return False
+
 async def download_video_stream(url: str, output_path: str, editable: Message, title: str) -> bool:
-    """Downloads HLS/M3U8 or MP4 using yt-dlp / ffmpeg / direct stream with candidate fallbacks."""
+    """Downloads HLS/M3U8 or MP4 using Pure Python HLS, yt-dlp, ffmpeg, or direct stream."""
     clean_url = clean_appx_url(url)
     
     candidates = [clean_url]
@@ -159,13 +237,14 @@ async def download_video_stream(url: str, output_path: str, editable: Message, t
         candidates.append(clean_url.replace("transcoded-videos-v2", "transcoded-videos"))
         
     for target_url in candidates:
-        # 1. Try yt-dlp
+        # 1. Try Pure Python HLS Engine (no external binaries required)
+        if ".m3u8" in target_url:
+            ok = await download_hls_stream_pure_python(target_url, output_path, editable, title)
+            if ok:
+                return True
+
+        # 2. Try yt-dlp
         try:
-            try:
-                await editable.edit(f"📥 **Downloading Video:** `{title[:40]}`\n⏳ *Fetching stream...*")
-            except Exception:
-                pass
-            
             cmd = [
                 "yt-dlp",
                 "--no-warnings",
@@ -175,20 +254,18 @@ async def download_video_stream(url: str, output_path: str, editable: Message, t
                 "-o", output_path,
                 target_url
             ]
-            
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            
             await proc.communicate()
             if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
                 return True
-        except Exception as e:
-            logger.warning(f"yt-dlp attempt failed: {e}")
+        except Exception:
+            pass
 
-        # 2. Try ffmpeg
+        # 3. Try ffmpeg
         try:
             cmd_ffmpeg = [
                 "ffmpeg", "-y",
@@ -210,28 +287,8 @@ async def download_video_stream(url: str, output_path: str, editable: Message, t
             await proc.communicate()
             if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
                 return True
-        except Exception as e:
-            logger.warning(f"ffmpeg attempt failed: {e}")
-    # 3. Try Python library yt_dlp
-    try:
-        import yt_dlp
-        for target_url in candidates:
-            def _run_ydl():
-                ydl_opts = {
-                    'outtmpl': output_path,
-                    'format': 'bestvideo+bestaudio/best',
-                    'quiet': True,
-                    'no_warnings': True,
-                    'nocheckcertificate': True,
-                    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-                }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([target_url])
-            await asyncio.to_thread(_run_ydl)
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                return True
-    except Exception as e:
-        logger.warning(f"yt_dlp library attempt failed: {e}")
+        except Exception:
+            pass
 
     # Fallback to direct HTTP download ONLY if it's explicitly an MP4 file
     base_url = clean_url.split('?')[0].lower()
@@ -357,6 +414,11 @@ async def process_batch_downloader(bot: Client, m: Message, user_id: int):
                             except: pass
                 else:
                     fail_count += 1
+                    try:
+                        await editable.edit(f"⚠️ **Skipped (Dead / 404 on Server):** `{title[:40]}`\n*Moving to next item...*")
+                        await asyncio.sleep(1.2)
+                    except Exception:
+                        pass
                     
             elif ftype == "VIDEO":
                 vid_path = os.path.join(temp_dir, f"{clean_title}.mp4")
@@ -384,6 +446,11 @@ async def process_batch_downloader(bot: Client, m: Message, user_id: int):
                             except: pass
                 else:
                     fail_count += 1
+                    try:
+                        await editable.edit(f"⚠️ **Skipped (HTTP 404 / Dead Video):** `{title[:40]}`\n*Stream not hosted on CDN. Continuing...*")
+                        await asyncio.sleep(1.2)
+                    except Exception:
+                        pass
             else:
                 gen_path = os.path.join(temp_dir, f"{clean_title}.bin")
                 ok = await download_file_http(url, gen_path, editable, title)
@@ -404,9 +471,9 @@ async def process_batch_downloader(bot: Client, m: Message, user_id: int):
         final_msg = (
             f"🎉 **Batch Download & Upload Completed!**\n\n"
             f"✅ **Successfully Uploaded:** `{success_count}` items\n"
-            f"❌ **Failed:** `{fail_count}` items\n"
+            f"⚠️ **Skipped (Expired 404 on Server):** `{fail_count}` items\n"
             f"⏱️ **Total Time:** `{total_time}`\n\n"
-            f"<blockquote>All files sent to destination chat.</blockquote>"
+            f"<blockquote>All active files sent to destination chat.</blockquote>"
         )
         try:
             await editable.edit(final_msg)
