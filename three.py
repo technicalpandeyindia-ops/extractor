@@ -525,30 +525,34 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
 
             try: await editable.delete()
             except: pass
-            editable = await m.reply_text("**Fetching Available Courses... 🔍**")
+            editable = await m.reply_text("🔍 **Fetching Your Enrolled / Purchased Courses... ⏳**")
 
-            res1 = await fetch_appx_html_to_json(session, f"{api}/get/courselist", headers)
-            res2 = await fetch_appx_html_to_json(session, f"{api}/get/courselistnewv2", headers)
-            res_all = await fetch_appx_html_to_json(session, f"{api}/get/allcourse2", headers)
-
-            courses1 = res1.get("data", []) if res1 and isinstance(res1.get("data"), list) else []
-            courses2 = res2.get("data", []) if res2 and isinstance(res2.get("data"), list) else []
-            courses_all = res_all.get("data", []) if res_all and isinstance(res_all.get("data"), list) else []
-            courses3 = []
-
+            # 1. Fetch only enrolled/purchased courses
+            purchased_courses = []
             if token:
-                for ep in ["mycourse", "my_course_list", "get_my_course_new", "mycoursev2"]:
-                    res3 = await fetch_appx_html_to_json(session, f"{api}/get/{ep}", headers)
-                    if res3 and res3.get("data") and isinstance(res3["data"], list) and len(res3["data"]) > 0:
-                        courses3 = res3["data"]
+                for ep in ["mycourse", "my_course_list", "get_my_course_new", "mycoursev2", "user_purchased_courses"]:
+                    res_my = await fetch_appx_html_to_json(session, f"{api}/get/{ep}", headers)
+                    if res_my and res_my.get("data") and isinstance(res_my["data"], list) and len(res_my["data"]) > 0:
+                        purchased_courses = res_my["data"]
                         break
 
-            raw_courses = courses3 + courses1 + courses2 + courses_all
-            
+            # 2. If mycourse endpoint was empty, inspect catalog for is_purchased / is_enrolled flags
+            if not purchased_courses:
+                for ep in ["courselist", "courselistnewv2", "allcourse2"]:
+                    res_cat = await fetch_appx_html_to_json(session, f"{api}/get/{ep}", headers)
+                    if res_cat and res_cat.get("data") and isinstance(res_cat["data"], list):
+                        for c in res_cat["data"]:
+                            if isinstance(c, dict):
+                                is_pur = str(c.get("is_purchased") or c.get("purchased") or c.get("is_buy") or c.get("is_enrolled") or "0")
+                                if is_pur == "1":
+                                    purchased_courses.append(c)
+                        if purchased_courses:
+                            break
+
             # Deduplicate by course id
             courses = []
             seen_ids = set()
-            for c in raw_courses:
+            for c in purchased_courses:
                 if isinstance(c, dict):
                     cid = str(c.get('id') or c.get('course_id') or "")
                     if cid and cid not in seen_ids:
@@ -556,8 +560,10 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
                         courses.append(c)
 
             if not courses:
-                await editable.edit("**Did not find any course! ❌\nCheck if token is expired or if the App API endpoint is valid.**")
+                await editable.edit("**No Enrolled / Purchased Courses Found in this Account! ❌**\n*Make sure your account is enrolled in the course and the login credentials/token are correct.*")
                 return
+
+
 
             total = len(courses)
             if total > 40:
