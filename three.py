@@ -362,47 +362,41 @@ def extract_appx_item_links(item: Dict[str, Any], api: str) -> List[str]:
         if thumbnail:
             outputs.append(f"{Title}:{clean_appx_url(thumbnail)}\n")
 
-    # 4. Video Extraction (VOD playlist_eof -> download_links -> download_link -> recording_hls -> file_link -> video_url)
+    # 4. Video Extraction: Prioritize active HLS streams, direct video URLs, and recording master playlists
     video_url = None
+    candidate_urls = []
+
+    # Priority 1: Direct recording HLS, active stream URLs, and video endpoints
+    for field in [
+        "recording_hls", "recordingHls", "video_url", "videoUrl", "hls_url", "hlsUrl",
+        "stream_url", "streamUrl", "file_link", "fileUrl", "url", "video_link", "videoLink"
+    ]:
+        val = item.get(field)
+        if val:
+            dec = appx_decrypt(str(val))
+            if dec and (dec.startswith("http") or dec.startswith("//")):
+                url_str = f"https:{dec}" if dec.startswith("//") else clean_appx_url(dec)
+                candidate_urls.append(url_str)
+
+    # Priority 2: Multi-bitrate download links
     if item.get("download_links") and isinstance(item["download_links"], list):
         for dl in item["download_links"]:
-            path = dl.get("path")
+            path = dl.get("path") or dl.get("url")
             if path:
                 dec = appx_decrypt(str(path))
                 if dec and (dec.startswith("http") or dec.startswith("//")):
-                    video_url = f"https:{dec}" if dec.startswith("//") else clean_appx_url(dec)
-                    break
+                    url_str = f"https:{dec}" if dec.startswith("//") else clean_appx_url(dec)
+                    candidate_urls.append(url_str)
 
-    if not video_url and item.get("download_link"):
+    if item.get("download_link"):
         dec = appx_decrypt(str(item["download_link"]))
         if dec and (dec.startswith("http") or dec.startswith("//")):
-            video_url = f"https:{dec}" if dec.startswith("//") else clean_appx_url(dec)
+            url_str = f"https:{dec}" if dec.startswith("//") else clean_appx_url(dec)
+            candidate_urls.append(url_str)
 
-    if not video_url and item.get("recording_hls"):
-        dec = appx_decrypt(str(item["recording_hls"]))
-        if dec and (dec.startswith("http") or dec.startswith("//")):
-            video_url = f"https:{dec}" if dec.startswith("//") else clean_appx_url(dec)
-
-    if not video_url and item.get("file_link"):
-        dec = appx_decrypt(str(item["file_link"]))
-        if dec and (dec.startswith("http") or dec.startswith("//")):
-            video_url = f"https:{dec}" if dec.startswith("//") else clean_appx_url(dec)
-
-    if not video_url:
-        for field in [
-            "video_url", "videoUrl", "hls_url", "hlsUrl", "stream_url", "streamUrl",
-            "media_url", "mediaUrl", "mpd_url", "mpdUrl", "download_url", "downloadUrl",
-            "url", "file_url", "fileUrl", "video_link", "videoLink", "source_url", "sourceUrl"
-        ]:
-            val = item.get(field)
-            if val:
-                dec = appx_decrypt(str(val))
-                if dec and (dec.startswith("http") or dec.startswith("//")):
-                    video_url = f"https:{dec}" if dec.startswith("//") else clean_appx_url(dec)
-                    break
-                elif val and (str(val).startswith("http") or str(val).startswith("//")):
-                    video_url = f"https:{val}" if str(val).startswith("//") else clean_appx_url(str(val))
-                    break
+    # Select the highest quality valid candidate URL
+    if candidate_urls:
+        video_url = candidate_urls[0]
 
     if video_url:
         outputs.append(f"{Title}:{video_url}\n")
