@@ -86,7 +86,7 @@ async def ask_user(bot: Client, m: Message, editable: Message, text: str, user_i
         return None
 
 def clean_appx_url(url: str) -> str:
-    """Normalizes Appx / Classx CDN URLs, converts live stream IDs to permanent VOD playlist_eof, and strips expired signatures and query params."""
+    """Normalizes Appx / Classx CDN URLs and strips expired signatures and query params."""
     if not url:
         return ""
     url = str(url).strip()
@@ -101,20 +101,15 @@ def clean_appx_url(url: str) -> str:
         if "?" in url and any(param in url for param in ("URLPrefix=", "Expires=", "KeyName=", "Signature=")):
             url = url.split("?")[0]
             
-    # Handle vodclasses & live stream conversions
-    # Convert ANY liveclasses / expired live link containing stream ID T_\d+ to permanent VOD playlist_eof
-    if "liveclasses" in url or ("classx.co.in" in url and "/live/" in url):
-        match = re.search(r'/(T_\d+|\d+)/', url) or re.search(r'(T_\d+)', url)
+    # Handle liveclasses conversions if explicitly from liveclasses.classx.co.in
+    if "liveclasses.classx.co.in" in url:
+        match = re.search(r'/(T_\d+|\d+)/', url)
         if match:
             stream_id = match.group(1)
             url = f"https://vodclasses.classx.co.in/live/{stream_id}/playlist_eof.m3u8"
                 
-    if "vodclasses.classx.co.in" in url:
-        # Strip query parameters from vodclasses playlist_eof for clean, permanent download/playback
-        if "?" in url:
-            url = url.split("?")[0]
-
     return url
+
 
 
 def extract_url_from_video_details(item: Dict) -> str:
