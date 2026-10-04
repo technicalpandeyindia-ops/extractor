@@ -82,7 +82,8 @@ async def fetch_appx_html_to_json(session: aiohttp.ClientSession, url: str, head
         for attempt in range(3):
             try:
                 if data:
-                    async with session.post(url, headers=headers, data=data) as response:
+                    # Appx API expects JSON body, NOT form-encoded data
+                    async with session.post(url, headers=headers, json=data) as response:
                         text = await response.text()
                 else:
                     async with session.get(url, headers=headers) as response:

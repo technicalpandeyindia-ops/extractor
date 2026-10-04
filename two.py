@@ -78,10 +78,33 @@ SEMAPHORE = asyncio.Semaphore(10)
 async def fetch_cpwp_signed_url(url_val: str, name: str, session: aiohttp.ClientSession, headers: Dict[str, str]) -> Optional[str]:
     async with SEMAPHORE:
         try:
-            async with session.get("https://api.classplusapp.com/cams/uploader/video/jw-signed-url", params={"url": url_val}, headers=headers) as resp:
+            # Classplus API accepts either `url` (direct media URL) or `contentId` (content ID).
+            # Try contentId first if the value looks like an ID (no slashes/dots), then fall back to url param.
+            is_content_id = url_val and "/" not in url_val and "." not in url_val
+            param_key = "contentId" if is_content_id else "url"
+
+            async with session.get(
+                "https://api.classplusapp.com/cams/uploader/video/jw-signed-url",
+                params={param_key: url_val},
+                headers=headers
+            ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    result = data.get("url") or data.get("drmUrls", {}).get("manifestUrl")
+                    if result:
+                        return result
+
+            # Retry with the other param key
+            alt_key = "url" if is_content_id else "contentId"
+            async with session.get(
+                "https://api.classplusapp.com/cams/uploader/video/jw-signed-url",
+                params={alt_key: url_val},
+                headers=headers
+            ) as resp2:
+                if resp2.status == 200:
+                    data = await resp2.json()
                     return data.get("url") or data.get("drmUrls", {}).get("manifestUrl")
+
         except Exception as e:
             logging.error(f"Error fetching signed URL for {name}: {e}")
         return None

@@ -266,7 +266,19 @@ async def process_pwwp_chapter_content(
 
                     hw_topic = hw.get("topic", topic)
 
+                    # PW API v3: videoDetails may sit directly on the homework object
+                    hw_video_url = extract_url_from_video_details(hw)
+                    if hw_video_url:
+                        content.append(f"{hw_topic}:{hw_video_url}")
+                        continue
+
                     for att in hw.get("attachmentIds", []) or []:
+
+                        # Check attachment-level videoDetails first (PW v3 pattern)
+                        att_video_url = extract_url_from_video_details(att)
+                        if att_video_url:
+                            content.append(f"{hw_topic}:{att_video_url}")
+                            continue
 
                         u = (
                             att.get("baseUrl", "") +

@@ -50,9 +50,9 @@ _pti.Identifier.matches = _patched_matches
 _pti.Identifier.count_populated = _patched_count_populated
 
 import config
-api_id = getattr(config, "api_id", getattr(config, "API_ID", 33466201))
-api_hash = getattr(config, "api_hash", getattr(config, "API_HASH", "c487cc22d111e6febcbf1e9c2b088e9a"))
-bot_token = getattr(config, "bot_token", getattr(config, "BOT_TOKEN", "8623292536:AAGeZ7fa1jG4l9f08Nq7l_XNreyHn3RI6Zs"))
+api_id = getattr(config, "api_id", getattr(config, "API_ID", 0))
+api_hash = getattr(config, "api_hash", getattr(config, "API_HASH", ""))
+bot_token = getattr(config, "bot_token", getattr(config, "BOT_TOKEN", ""))
 from helpers import is_authorized
 from one import register_pwwp_handlers
 from two import register_cpwp_handlers

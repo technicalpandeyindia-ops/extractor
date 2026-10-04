@@ -299,12 +299,16 @@ async def download_hls_stream_pure_python(m3u8_url: str, output_path: str, edita
             lines = [l.strip() for l in m3u8_content.splitlines() if l.strip()]
             variant_playlists = [l for l in lines if not l.startswith("#") and ".m3u8" in l]
             if variant_playlists:
+                # Default to first variant (master playlists list lowest→highest, pick last = highest)
                 target_variant = variant_playlists[-1]
+                # Prefer explicit resolution labels: 1080 > 720 > 480
                 for v in variant_playlists:
-                    if "720" in v:
+                    if "1080" in v:
                         target_variant = v
                         break
-                    elif "480" in v:
+                    elif "720" in v:
+                        target_variant = v
+                    elif "480" in v and "720" not in target_variant and "1080" not in target_variant:
                         target_variant = v
                 
                 sub_url = urllib.parse.urljoin(m3u8_url, target_variant)
@@ -387,14 +391,19 @@ async def download_video_stream(url: str, output_path: str, editable: Message, t
 
         # 2. yt-dlp with Akamai headers
         try:
+            # yt-dlp appends extension itself — use a temp base path so we can detect the result
+            ytdlp_base = output_path.replace(".mp4", "")
+            ytdlp_out_tmpl = f"{ytdlp_base}.%(ext)s"
             cmd = [
                 "yt-dlp",
                 "--no-warnings",
                 "--no-check-certificates",
                 "--concurrent-fragments", "8",
+                "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+                "--merge-output-format", "mp4",
                 "--add-header", "User-Agent:Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
                 "--add-header", "Referer:https://appx-play.akamai.net.in/",
-                "-o", output_path,
+                "-o", ytdlp_out_tmpl,
                 target_url
             ]
             proc = await asyncio.create_subprocess_exec(
@@ -403,6 +412,13 @@ async def download_video_stream(url: str, output_path: str, editable: Message, t
                 stderr=asyncio.subprocess.PIPE
             )
             await proc.communicate()
+            # yt-dlp may have written .mp4 or .mkv — find and rename to output_path
+            for ext in ["mp4", "mkv", "webm", "ts"]:
+                candidate = f"{ytdlp_base}.{ext}"
+                if os.path.exists(candidate) and os.path.getsize(candidate) > 1000:
+                    if candidate != output_path:
+                        os.rename(candidate, output_path)
+                    return True
             if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
                 return True
         except Exception:
@@ -412,14 +428,17 @@ async def download_video_stream(url: str, output_path: str, editable: Message, t
         try:
             cmd_ffmpeg = [
                 "ffmpeg", "-y",
+                "-loglevel", "error",
                 "-user_agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
-                "-headers", "Referer: https://appx-play.akamai.net.in/\r\n",
+                "-headers", "Referer: https://appx-play.akamai.net.in/\r\nOrigin: https://appx-play.akamai.net.in\r\n",
                 "-reconnect", "1",
                 "-reconnect_at_eof", "1",
                 "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "5",
+                "-reconnect_delay_max", "10",
+                "-timeout", "30000000",
                 "-i", target_url,
                 "-c", "copy",
+                "-movflags", "+faststart",
                 "-bsf:a", "aac_adtstoasc",
                 output_path
             ]
@@ -470,9 +489,20 @@ def parse_link_lines(raw_text: str) -> List[Tuple[str, str, str, str]]:
                 url = line[http_pos:].strip()
                 
                 # Determine type
-                if "(PDF)" in title.upper() or url.lower().endswith(".pdf") or "/subject/" in url or "/paid_course" in url or enc_key:
+                url_lower = url.lower()
+                title_upper = title.upper()
+                if "(PDF)" in title_upper or url_lower.endswith(".pdf") or "/subject/" in url or "/paid_course" in url or (enc_key and not any(v in url_lower for v in [".m3u8", ".mp4", "vodclasses", "classx", "liveclasses", "transcoded", "hls", "/video"])):
                     file_type = "PDF"
-                elif any(ext in url.lower() for ext in [".m3u8", ".mp4", "transcoded-videos", "vodclasses", "liveclasses", "hls", "/videos/"]):
+                elif any(ext in url_lower for ext in [
+                    ".m3u8", ".mp4", ".ts",
+                    "transcoded-videos", "transcoded_videos",
+                    "vodclasses", "liveclasses",
+                    "classx.co.in/live", "classx.co.in/vod",
+                    "appx-play.akamai", "akamai.net",
+                    "hls", "/videos/", "playlist_eof",
+                    "video_url", "stream", "cloudfront.net",
+                    "youtube.com/watch", "youtu.be"
+                ]):
                     file_type = "VIDEO"
                 else:
                     file_type = "FILE"

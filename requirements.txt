@@ -5,4 +5,4 @@ aiohttp>=3.9.0
 flask>=3.0.0
 requests>=2.31.0
 tgcrypto>=1.2.5
-yt-dlp>=2024.0.0
+yt-dlp>=2026.1.1

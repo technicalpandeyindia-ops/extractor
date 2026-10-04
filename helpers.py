@@ -123,12 +123,32 @@ def extract_url_from_video_details(item: Dict) -> str:
     v_details = item.get("videoDetails") or {}
     if not isinstance(v_details, dict):
         v_details = {}
+
+    # PW API v3 new fields: encryptedVideoUrl, ytVideoId (youtube embed), brightcoveUrl
+    # Try decrypting encryptedVideoUrl first (PW uses simple base64 in some versions)
+    enc_url = v_details.get("encryptedVideoUrl") or item.get("encryptedVideoUrl") or ""
+    if enc_url:
+        try:
+            from base64 import b64decode
+            decoded = b64decode(enc_url + "==").decode("utf-8", errors="ignore")
+            if decoded.startswith("http"):
+                enc_url = decoded
+        except Exception:
+            pass
+
+    # ytVideoId -> construct youtube embed URL
+    yt_id = v_details.get("ytVideoId") or item.get("ytVideoId") or ""
+    yt_url = f"https://www.youtube.com/watch?v={yt_id}" if yt_id else ""
+
     url = (
-        v_details.get("videoUrl") or v_details.get("embedCode") or v_details.get("mediaUrl") or
-        v_details.get("streamUrl") or v_details.get("hlsUrl") or v_details.get("mpdUrl") or
+        v_details.get("videoUrl") or v_details.get("hlsUrl") or v_details.get("streamUrl") or
+        v_details.get("mediaUrl") or v_details.get("mpdUrl") or v_details.get("brightcoveUrl") or
         v_details.get("downloadUrl") or v_details.get("url") or v_details.get("fileUrl") or
-        item.get("videoUrl") or item.get("mediaUrl") or item.get("streamUrl") or
-        item.get("hlsUrl") or item.get("mpdUrl") or item.get("url") or ""
+        v_details.get("embedCode") or
+        (enc_url if enc_url.startswith("http") else "") or yt_url or
+        item.get("videoUrl") or item.get("hlsUrl") or item.get("streamUrl") or
+        item.get("mediaUrl") or item.get("mpdUrl") or item.get("url") or
+        item.get("brightcoveUrl") or item.get("encryptedVideoUrl") or ""
     )
     if url and ("<" in url or "iframe" in url.lower() or "src=" in url.lower()):
         match = re.search(r'src=["\'](https?://[^"\']+)["\']', url)
