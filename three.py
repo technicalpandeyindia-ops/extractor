@@ -72,14 +72,33 @@ async def update_status_card(editable: Message, task_name: str, current: int, to
         pass
 
 async def fetch_appx_html_to_json(session: aiohttp.ClientSession, url: str, headers: Dict = None, data: Any = None) -> Any:
+    default_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Client-Service": "Appx",
+        "Auth-Key": "appxapi",
+        "source": "website"
+    }
+    req_headers = default_headers.copy()
+    if headers:
+        req_headers.update(headers)
+
     async with SEMAPHORE:
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 if data:
-                    async with session.post(url, headers=headers, data=data) as response:
+                    async with session.post(url, headers=req_headers, data=data) as response:
+                        if response.status == 429:
+                            logger.warning(f"Appx Rate Limited (429) for {url}, backing off... attempt {attempt + 1}")
+                            await asyncio.sleep(2.0 * (attempt + 1))
+                            continue
                         text = await response.text()
                 else:
-                    async with session.get(url, headers=headers) as response:
+                    async with session.get(url, headers=req_headers) as response:
+                        if response.status == 429:
+                            logger.warning(f"Appx Rate Limited (429) for {url}, backing off... attempt {attempt + 1}")
+                            await asyncio.sleep(2.0 * (attempt + 1))
+                            continue
                         text = await response.text()
 
                 try:
@@ -105,8 +124,8 @@ async def fetch_appx_html_to_json(session: aiohttp.ClientSession, url: str, head
                 logger.error(f"Appx Attempt {attempt + 1} failed for {url}: {e}")
             except Exception as e:
                 logger.exception(f"Appx Unexpected error for {url}: {e}")
-            if attempt < 2:
-                await asyncio.sleep(1.5 ** attempt)
+            if attempt < 3:
+                await asyncio.sleep(1.5 * (attempt + 1))
         return None
 
 def extract_user_id_from_jwt(token: str) -> str:
@@ -518,10 +537,15 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
                 "Client-Service": "Appx",
                 "Auth-Key": "appxapi",
                 "source": "website",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*"
             }
             if token:
                 headers['Authorization'] = formatted_token
+                headers['token'] = formatted_token
                 headers['User-ID'] = str(extracted_jwt_userid)
+                headers['User-Id'] = str(extracted_jwt_userid)
+                headers['user_id'] = str(extracted_jwt_userid)
 
             try: await editable.delete()
             except: pass
