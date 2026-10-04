@@ -545,19 +545,42 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
                 api_endpoint = f"{api}/get/allcourse2"
 
             await editable.edit("🔍 **Fetching courses list... ⏳**")
-            res = await fetch_appx_html_to_json(session, api_endpoint, headers=headers)
+            
+            my_courses = []
+            if token:
+                for ep in ["mycourse", "my_course_list", "get_my_course_new", "mycoursev2"]:
+                    res_my = await fetch_appx_html_to_json(session, f"{api}/get/{ep}", headers)
+                    if res_my and res_my.get("data") and isinstance(res_my["data"], list) and len(res_my["data"]) > 0:
+                        my_courses = res_my["data"]
+                        break
 
-            if not res or not res.get("data"):
-                if course_type == "1":
-                    res = await fetch_appx_html_to_json(session, f"{api}/get/allcourse2", headers=headers)
+            res_list1 = await fetch_appx_html_to_json(session, f"{api}/get/courselist", headers)
+            res_list2 = await fetch_appx_html_to_json(session, f"{api}/get/courselistnewv2", headers)
+            res_all = await fetch_appx_html_to_json(session, f"{api}/get/allcourse2", headers)
 
-            if not res or not res.get("data"):
-                await editable.edit("**No courses found or Token/API expired! ❌**")
+            c1 = res_list1.get("data", []) if res_list1 and isinstance(res_list1.get("data"), list) else []
+            c2 = res_list2.get("data", []) if res_list2 and isinstance(res_list2.get("data"), list) else []
+            c3 = res_all.get("data", []) if res_all and isinstance(res_all.get("data"), list) else []
+
+            if course_type == "1" and my_courses:
+                combined = my_courses
+            else:
+                combined = my_courses + c1 + c2 + c3
+
+            # Deduplicate by id
+            course_data = []
+            seen_ids = set()
+            for c in combined:
+                if isinstance(c, dict):
+                    cid = str(c.get("id") or c.get("course_id") or "")
+                    if cid and cid not in seen_ids:
+                        seen_ids.add(cid)
+                        course_data.append(c)
+
+            if not course_data:
+                await editable.edit("**No courses found or Token/API expired! ❌**\n*Make sure you selected the correct App and entered a valid token.*")
                 return
 
-            course_data = res["data"]
-            if not isinstance(course_data, list):
-                course_data = [course_data]
 
             courses_text = f"**Available Courses for {selected_app_name}:**\n\n"
             for cnt, item in enumerate(course_data):

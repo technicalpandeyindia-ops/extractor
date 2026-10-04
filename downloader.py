@@ -465,9 +465,13 @@ def parse_link_lines(raw_text: str) -> List[Tuple[str, str, str, str]]:
             if http_pos == -1:
                 http_pos = line.find("https://")
             
-            if http_pos > 0:
-                title = line[:http_pos].rstrip(": \t-").strip()
-                url = line[http_pos:].strip()
+            if http_pos >= 0:
+                if http_pos > 0:
+                    title = line[:http_pos].rstrip(": \t-").strip()
+                    url = line[http_pos:].strip()
+                else:
+                    title = f"File_{len(items) + 1}"
+                    url = line.strip()
                 
                 # Determine type
                 if "(PDF)" in title.upper() or url.lower().endswith(".pdf") or "/subject/" in url or "/paid_course" in url or enc_key:
@@ -477,8 +481,9 @@ def parse_link_lines(raw_text: str) -> List[Tuple[str, str, str, str]]:
                 else:
                     file_type = "FILE"
                     
-                items.append((title or "File", clean_appx_url(url), file_type, enc_key))
+                items.append((title or f"File_{len(items) + 1}", clean_appx_url(url), file_type, enc_key))
     return items
+
 
 async def process_batch_downloader(bot: Client, m: Message, user_id: int):
     editable = await m.reply_text("**Wait initializing Appx V2 Downloader... ⏳**")
