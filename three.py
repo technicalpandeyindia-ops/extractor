@@ -17,16 +17,17 @@ import aiohttp
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-from helpers import appx_decrypt, clean_appx_url, ask_user, is_authorized
+from helpers import appx_decrypt, ask_user, clean_appx_url, is_authorized, send_extracted_text_file
 
+logger = logging.getLogger("AppxExtractor")
+
+# Throttle API requests to prevent Appx rate-limiting
 SEMAPHORE = asyncio.Semaphore(15)
 
 class ProcessCancelledException(Exception):
-    """Custom exception raised when a process is cancelled by the user."""
     pass
 
 def format_time(seconds: float) -> str:
-    """Format seconds into a human-readable HH:MM:SS or MM:SS string."""
     seconds = int(seconds)
     mins, secs = divmod(seconds, 60)
     hrs, mins = divmod(mins, 60)
@@ -35,23 +36,17 @@ def format_time(seconds: float) -> str:
     return f"{mins:02d}m {secs:02d}s"
 
 async def prompt_user(bot: Client, message: Message, editable: Message, text: str, user_id: int) -> str:
-    """Helper wrapper to ask user input with built-in /cancel check."""
     cancel_notice = "\n\n<blockquote>❌ **Send `/cancel` at any time to abort this process.**</blockquote>"
     full_text = text + cancel_notice
-    
     response = await ask_user(bot, message, editable, full_text, user_id)
-    
     if response is None or response.strip().lower() == "/cancel":
         await editable.edit("**Process Cancelled by User ❌**")
         raise ProcessCancelledException("User requested cancellation.")
-    
     return response.strip()
 
 async def update_status_card(editable: Message, task_name: str, current: int, total: int, start_time: float, activity: str):
-    """Formats and updates a progress tracking message card."""
     percentage = (current / total * 100) if total > 0 else 0
     elapsed = time.time() - start_time
-    
     if current > 0 and total > 0:
         avg_time_per_unit = elapsed / current
         remaining_units = total - current
@@ -71,7 +66,6 @@ async def update_status_card(editable: Message, task_name: str, current: int, to
         f"⏳ **Time Left (ETA):** `{eta_str}`\n\n"
         f"<blockquote>❌ **Send `/cancel` to abort.**</blockquote>"
     )
-    
     try:
         await editable.edit(status_text)
     except Exception:
@@ -81,17 +75,11 @@ async def fetch_appx_html_to_json(session: aiohttp.ClientSession, url: str, head
     async with SEMAPHORE:
         for attempt in range(3):
             try:
-                timeout = aiohttp.ClientTimeout(total=30)
                 if data:
-                    # Non-login POST endpoints expect JSON body
-                    async with session.post(url, headers=headers, json=data, timeout=timeout) as response:
-                        if response.status not in (200, 201):
-                            logging.warning(f"Appx API non-200: {response.status} @ {url}")
+                    async with session.post(url, headers=headers, data=data) as response:
                         text = await response.text()
                 else:
-                    async with session.get(url, headers=headers, timeout=timeout) as response:
-                        if response.status not in (200, 201):
-                            logging.warning(f"Appx API non-200: {response.status} @ {url}")
+                    async with session.get(url, headers=headers) as response:
                         text = await response.text()
 
                 try:
@@ -103,23 +91,20 @@ async def fetch_appx_html_to_json(session: aiohttp.ClientSession, url: str, head
                         open_brace_count = 0
                         close_brace_count = 0
                         json_end = -1
-
                         for i, char in enumerate(json_str):
                             if char == '{':
                                 open_brace_count += 1
                             elif char == '}':
                                 close_brace_count += 1
-
                             if open_brace_count > 0 and open_brace_count == close_brace_count:
                                 json_end = i + 1
                                 break
-
                         if json_end != -1:
                             return json.loads(json_str[:json_end])
             except aiohttp.ClientError as e:
-                logging.error(f"Appx Attempt {attempt + 1} failed for {url}: {e}")
+                logger.error(f"Appx Attempt {attempt + 1} failed for {url}: {e}")
             except Exception as e:
-                logging.exception(f"Appx Unexpected error for {url}: {e}")
+                logger.exception(f"Appx Unexpected error for {url}: {e}")
             if attempt < 2:
                 await asyncio.sleep(1.5 ** attempt)
         return None
@@ -133,276 +118,121 @@ def extract_user_id_from_jwt(token: str) -> str:
             data = json.loads(payload_json)
             return str(data.get("id") or data.get("user_id") or data.get("sub") or "0")
     except Exception as e:
-        logging.warning(f"Failed to parse user-id from token: {e}")
+        logger.warning(f"Failed to parse user-id from token: {e}")
     return "0"
 
 BUILTIN_APPX_APIS = [
-    {"name": "Edumantra Institute", "api": "https://edumantrainstituteapi.akamai.net.in"},
-    {"name": "Edu Mantra", "api": "https://edumantrainstituteapi.akamai.net.in"},
-    {"name": "Adhyayan Mantra", "api": "https://adhyayanmantraapi.appx.co.in"},
-    {"name": "Adhyayan Mantra Live", "api": "https://adhyayanmantraapi.appx.co.in"},
-    {"name": "Target With Alok", "api": "https://targetwithalokapi.appx.co.in"},
-    {"name": "Khan Global Studies", "api": "https://khanglobalstudiesapi.appx.co.in"},
-    {"name": "Sanskriti IAS", "api": "https://sanskritiiasapi.appx.co.in"},
-    {"name": "Dhyeya IAS", "api": "https://dhyeyaiasapi.appx.co.in"},
-    {"name": "Kavya Classes", "api": "https://kavyaclassesapi.appx.co.in"},
-    {"name": "RWA Rojgar With Ankit", "api": "https://rojgarwithankitapi.appx.co.in"},
-    {"name": "Chandra Institute", "api": "https://chandrainstituteapi.appx.co.in"},
-    {"name": "Utkarsh Classes", "api": "https://utkarshapi.appx.co.in"},
-    {"name": "Paramount Coaching", "api": "https://paramountcoachingapi.appx.co.in"},
-    {"name": "Examपुर ExamPUR", "api": "https://exampurapi.appx.co.in"},
-    {"name": "Winner Institute", "api": "https://winnerinstituteapi.appx.co.in"},
-    {"name": "Careerwill Appx", "api": "https://careerwillapi.appx.co.in"},
-    {"name": "Perfection IAS", "api": "https://perfectioniasapi.appx.co.in"},
-    {"name": "Sachin Academy", "api": "https://sachinacademyapi.appx.co.in"},
-    {"name": "Step Up Academy", "api": "https://stepupacademyapi.appx.co.in"},
-    {"name": "Gyanpeeth", "api": "https://gyanpeethapi.appx.co.in"},
-    {"name": "Mahendras", "api": "https://mahendrasapi.appx.co.in"},
-    {"name": "KD Campus", "api": "https://kdcampusapi.appx.co.in"},
-    {"name": "The Officers Academy", "api": "https://theofficersacademyapi.appx.co.in"},
-    {"name": "Kautilya Classes", "api": "https://kautilyaclassesapi.appx.co.in"}
+    {"name": "Adhyayan Mantra", "api": "https://adhyayanmantraapi.classx.co.in", "website": "https://live.adhyayanmantra.com"},
+    {"name": "Akash Institute", "api": "https://akashapi.classx.co.in", "website": "https://akash.classx.co.in"},
+    {"name": "Allen", "api": "https://allenapi.classx.co.in", "website": "https://allen.classx.co.in"},
+    {"name": "Apna Kaksha", "api": "https://apnakakshaapi.classx.co.in", "website": "https://apnakaksha.classx.co.in"},
+    {"name": "Careerwill", "api": "https://careerwillapi.classx.co.in", "website": "https://careerwill.com"},
+    {"name": "Competition Wallah", "api": "https://competitionwallahapi.classx.co.in", "website": "https://competitionwallah.classx.co.in"},
+    {"name": "Drishti IAS", "api": "https://drishtiiasapi.classx.co.in", "website": "https://drishtiias.classx.co.in"},
+    {"name": "Exampur", "api": "https://exampurapi.classx.co.in", "website": "https://exampur.com"},
+    {"name": "Khan Global Studies", "api": "https://khanglobalstudiesapi.classx.co.in", "website": "https://khanglobalstudies.com"},
+    {"name": "MD Classes", "api": "https://mdclassesapi.classx.co.in", "website": "https://mdclasses.classx.co.in"},
+    {"name": "Next IAS", "api": "https://nextiasapi.classx.co.in", "website": "https://nextias.com"},
+    {"name": "Pariksha App", "api": "https://parikshaapi.classx.co.in", "website": "https://pariksha.co"},
+    {"name": "PW Appx", "api": "https://physicswallahapi.classx.co.in", "website": "https://physicswallah.classx.co.in"},
+    {"name": "Rajasthan Gyan", "api": "https://rajasthangyanapi.classx.co.in", "website": "https://rajasthangyan.classx.co.in"},
+    {"name": "Rojgar With Ankit", "api": "https://rojgarwithankitapi.classx.co.in", "website": "https://rojgarwithankit.co.in"},
+    {"name": "Sankalp Bharat", "api": "https://sankalpbharatapi.classx.co.in", "website": "https://sankalpbharat.com"},
+    {"name": "Sanskrit Ganga", "api": "https://sanskritgangaapi.classx.co.in", "website": "https://sanskritganga.classx.co.in"},
+    {"name": "Target with Alok", "api": "https://targetwithalokapi.classx.co.in", "website": "https://targetwithalok.classx.co.in"},
+    {"name": "Utkarsh Classes", "api": "https://utkarshapi.classx.co.in", "website": "https://utkarsh.com"},
+    {"name": "Vedantu", "api": "https://vedantuapi.classx.co.in", "website": "https://vedantu.com"},
+    {"name": "Winners Institute", "api": "https://winnersinstituteapi.classx.co.in", "website": "https://winnersinstitute.in"},
+    {"name": "Wi-Fi Study", "api": "https://wifistudyapi.classx.co.in", "website": "https://wifistudy.com"}
 ]
 
-def find_appx_matching_apis(search_api: List[str], appxapis_file=None) -> List[Dict]:
+def find_appx_matching_apis(search_api: List[str], appxapis_file="threeapis.json") -> List[Dict]:
     matched_apis = []
-    api_data = list(BUILTIN_APPX_APIS)
-
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        appxapis_file,
-        os.path.join(base_dir, "threeapis.json"),
-        os.path.join(base_dir, "appxapis.json")
-    ]
-    for candidate in candidates:
-        if candidate and os.path.exists(candidate):
-            try:
-                with open(candidate, 'r', encoding='utf-8') as f:
-                    file_data = json.load(f)
-                    if file_data and isinstance(file_data, list):
-                        api_data.extend(file_data)
-                        break
-            except Exception:
-                pass
+    api_data = BUILTIN_APPX_APIS.copy()
+    if os.path.exists(appxapis_file):
+        try:
+            with open(appxapis_file, 'r', encoding='utf-8') as f:
+                extra = json.load(f)
+                if isinstance(extra, list):
+                    api_data.extend(extra)
+        except Exception:
+            pass
 
     for item in api_data:
         for term in search_api:
             term = term.strip().lower()
-            if term and (term in item.get("name", "").lower() or term in item.get("api", "").lower()):
+            if term in item.get("name", "").lower() or term in item.get("api", "").lower():
                 matched_apis.append(item)
 
     unique_apis = []
     seen_apis = set()
     for item in matched_apis:
-        api_url = item.get("api")
-        if api_url and api_url not in seen_apis:
+        if item["api"] not in seen_apis:
             unique_apis.append(item)
-            seen_apis.add(api_url)
+            seen_apis.add(item["api"])
 
     return unique_apis
 
 async def resolve_api_and_app_name(bot: Client, m: Message, editable: Message, raw_input_text: str, user_id: int):
     raw_input_text = raw_input_text.strip()
-    
-    # 1. Direct Appx / Akamai / API URL passed
-    if any(k in raw_input_text for k in ["appx.co.in", "akamai.net.in", "classx.co.in", "api."]) or (raw_input_text.startswith(("http://", "https://")) and "api" in raw_input_text):
-        clean_url = re.sub(r'^https?://', '', raw_input_text).rstrip("/")
+    if raw_input_text.startswith(("http://", "https://")):
+        clean_url = raw_input_text.replace("https://", "").replace("http://", "").rstrip("/")
         api_url = f"https://{clean_url}"
-        app_label = clean_url.split(".")[0].replace("api", "").capitalize()
-        return api_url, app_label
+        return api_url, api_url
 
-    # 2. Website URL passed (e.g. https://adhyayanmantra.com/ or targetwithalok.in)
-    if raw_input_text.startswith(("http://", "https://")) or ("." in raw_input_text and "/" in raw_input_text):
-        domain_part = re.sub(r'https?://', '', raw_input_text).split('/')[0]
-        base_name = domain_part.split('.')[0].lower()
-        
-        # Check if matching API exists in database
-        matches = find_appx_matching_apis([base_name])
-        if matches:
-            return matches[0]["api"], matches[0]["name"]
-        
-        # Auto-derive Appx standard API endpoint
-        candidate_api = f"https://{base_name}api.appx.co.in"
-        return candidate_api, base_name.capitalize()
-
-    # 3. Name or search terms passed
     search_terms = [term.strip() for term in raw_input_text.split()]
     matches = find_appx_matching_apis(search_terms)
 
     if not matches:
-        # Fallback: Auto-construct from search term (e.g. 'adhyayan mantra' -> 'adhyayanmantraapi.appx.co.in')
-        slug = re.sub(r'[^a-zA-Z0-9]', '', raw_input_text).lower()
-        if slug:
-            candidate_api = f"https://{slug}api.appx.co.in"
-            return candidate_api, raw_input_text.title()
-
-        await editable.edit("**No matches found! Enter Correct App Name or API URL ❌**")
+        await editable.edit("**No matches found! Enter Correct App Starting Word ❌**")
         return None, None
-
-    if len(matches) == 1:
-        return matches[0]["api"], matches[0]["name"]
-
-    if len(matches) > 30:
-        matches = matches[:30]
-        truncated_note = "\n\n⚠️ *Showing first 30 matches.*"
-    else:
-        truncated_note = ""
 
     text = ""
     for cnt, item in enumerate(matches):
-        text += f"<blockquote>**{cnt + 1}.** `{item['name']}`</blockquote>\n"
+        text += f"<blockquote>**{cnt + 1}.** `{item['name']}:{item['api']}`</blockquote>\n"
 
-    selection_text = await prompt_user(bot, m, editable, f"**Select Number of your App:**\n\n{text}{truncated_note}", user_id)
+    selection_text = await prompt_user(bot, m, editable, f"**Select Index Number Of App API:**\n\n{text}", user_id)
 
     if selection_text.isdigit() and 1 <= int(selection_text) <= len(matches):
         selected_item = matches[int(selection_text) - 1]
         return selected_item['api'], selected_item['name']
     else:
-        await editable.edit("**Error: Invalid Selection ❌**")
+        await editable.edit("**Error: Wrong Index Number ❌**")
         return None, None
 
 async def login_appx_user(session: aiohttp.ClientSession, bot: Client, m: Message, editable: Message, user_id: int):
-    app_input = await prompt_user(bot, m, editable, "**Enter App Name, Website URL, or API URL:**\n*(e.g. `Adhyayan Mantra` or `https://adhyayanmantraapi.appx.co.in`)*", user_id)
+    app_input = await prompt_user(bot, m, editable, "**Enter App Name or API URL to login:**", user_id)
     api, app_name = await resolve_api_and_app_name(bot, m, editable, app_input, user_id)
     if not api or not app_name:
         return None, None, None
 
-    mobile = await prompt_user(bot, m, editable, "**Enter Registered Mobile Number:**", user_id)
+    mobile = await prompt_user(bot, m, editable, "**Enter Mobile Number:**", user_id)
     password = await prompt_user(bot, m, editable, "**Enter Password:**", user_id)
 
-    await editable.edit(f"🔑 **Authenticating with `{app_name}` servers...**")
-
-    # Appx login endpoints use form-encoded POST (NOT JSON)
-    form_headers = {
+    await editable.edit("🔑 **Authenticating with Appx servers...**")
+    headers = {
         "Client-Service": "Appx",
         "Auth-Key": "appxapi",
         "source": "website",
-        "User-Agent": "okhttp/4.9.0",
         "Content-Type": "application/x-www-form-urlencoded"
     }
 
-    login_candidates = [
-        f"{api}/post/userlogin",
-        f"{api}/post/userlogin_v2",
-        f"{api}/post/login",
-        f"{api}/post/userloginv2",
-        f"{api}/post/user/login",
-    ]
+    login_url = f"{api}/post/userlogin"
+    login_data = {
+        "email": mobile,
+        "password": password
+    }
 
-    payloads = [
-        {"email": mobile, "password": password},
-        {"phone": mobile, "password": password},
-        {"mobile": mobile, "password": password},
-        {"username": mobile, "password": password},
-        {"user": mobile, "pass": password},
-    ]
-
-    # All token field names Appx APIs have ever used across versions
-    TOKEN_FIELDS = [
-        "token", "jwt_token", "user_token", "authorization",
-        "accessToken", "access_token", "jwtToken", "bearerToken",
-        "bearer_token", "authToken", "auth_token", "userToken",
-        "jwt", "key", "sessionToken", "session_token",
-    ]
-
-    def _extract_token_from_response(res: dict) -> str:
-        """Exhaustively search the full response tree for any token field."""
-        if not isinstance(res, dict):
-            return ""
-
-        # 1. Root level
-        for field in TOKEN_FIELDS:
-            val = res.get(field)
-            if val and isinstance(val, str) and len(val) > 10:
-                return val
-
-        # 2. Inside res["data"] (dict)
-        inner = res.get("data")
-        if isinstance(inner, dict):
-            for field in TOKEN_FIELDS:
-                val = inner.get(field)
-                if val and isinstance(val, str) and len(val) > 10:
-                    return val
-            # 3. Nested res["data"]["data"]
-            inner2 = inner.get("data")
-            if isinstance(inner2, dict):
-                for field in TOKEN_FIELDS:
-                    val = inner2.get(field)
-                    if val and isinstance(val, str) and len(val) > 10:
-                        return val
-
-        # 4. Inside res["result"] or res["user"] or res["userInfo"]
-        for wrapper in ["result", "user", "userInfo", "userData", "response"]:
-            w = res.get(wrapper)
-            if isinstance(w, dict):
-                for field in TOKEN_FIELDS:
-                    val = w.get(field)
-                    if val and isinstance(val, str) and len(val) > 10:
-                        return val
-
-        return ""
-
-    res = None
-    token = ""
-    for login_url in login_candidates:
-        for payload in payloads:
-            try:
-                # Use raw aiohttp form POST — bypass fetch_appx_html_to_json which sends JSON
-                import urllib.parse
-                form_body = urllib.parse.urlencode(payload)
-                async with session.post(
-                    login_url,
-                    headers=form_headers,
-                    data=form_body,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as resp:
-                    text = await resp.text()
-                    try:
-                        import json as _json
-                        res = _json.loads(text)
-                    except Exception:
-                        import re as _re
-                        m_ = _re.search(r'\{', text)
-                        if m_:
-                            try:
-                                res = _json.loads(text[m_.start():])
-                            except Exception:
-                                res = None
-
-                if res:
-                    token = _extract_token_from_response(res)
-                    if token:
-                        break
-
-                    # Login returned data but no token — check status
-                    status_ok = (
-                        res.get("status") in (200, 1, True, "success", "ok") or
-                        res.get("success") in (True, 1, "true") or
-                        res.get("data") is not None
-                    )
-                    if status_ok:
-                        # Got a success response but no token yet — try next payload
-                        continue
-
-            except Exception as e:
-                logging.warning(f"Login attempt failed [{login_url}]: {e}")
-                continue
-
-        if token:
-            break
-
-    if not res:
-        await editable.edit("**Login Failed! ❌**\n`No response from server. Check API URL or mobile/password.`")
+    res = await fetch_appx_html_to_json(session, login_url, headers=headers, data=login_data)
+    if not res or res.get("status") != 200 or not res.get("data"):
+        msg = res.get("message", "Invalid credentials or login API endpoint mismatch.") if res else "No response from server."
+        await editable.edit(f"**Login Failed! ❌**\n`Reason: {msg}`")
         return None, None, None
 
+    data = res["data"]
+    token = data.get("token") or data.get("jwt_token") or data.get("user_token")
     if not token:
-        # Show the raw response so baby can debug
-        import json as _json
-        raw_preview = _json.dumps(res, indent=2)[:800]
-        await editable.edit(
-            f"**Login succeeded, but token not found in response! ❌**\n\n"
-            f"**Raw API response (debug):**\n`{raw_preview}`\n\n"
-            f"_If you see the token above, copy it and use **Direct Token** login instead._"
-        )
+        await editable.edit("**Login successful, but token could not be found in response! ❌**")
         return None, None, None
 
     token_msg = (
@@ -410,126 +240,82 @@ async def login_appx_user(session: aiohttp.ClientSession, bot: Client, m: Messag
         f"**App Name:** `{app_name}`\n"
         f"**Mobile:** `{mobile}`\n"
         f"**Token:**\n`{token}`\n\n"
-        f"<blockquote>Tap to copy token for future direct logins.</blockquote>"
+        f"<blockquote>Tap token to copy it for future use.</blockquote>"
     )
     await bot.send_message(chat_id=m.chat.id, text=token_msg)
     return api, token, app_name
 
-def extract_appx_item_links(item: Dict[str, Any], api: str) -> List[str]:
-    """
-    Extracts all valid permanent video streams and PDF notes from an Appx item.
-    - Decrypts AES ciphertext
-    - Extracts multi-bitrate VOD master streams (720p/480p) to avoid expiring live broadcast tokens
-    - Rewrites dead CloudFront tokens to permanent 200 OK CDN endpoints
-    - Extracts PDFs independently without skipping videos
-    """
-    outputs = []
-    Title = (item.get("Title") or item.get("title") or item.get("name") or "Item").strip()
-
-    # 1. PDF 1 Extraction
-    p1 = item.get("pdf_link")
-    if p1:
-        dec_p1 = appx_decrypt(str(p1))
-        if dec_p1 and dec_p1.endswith(".pdf"):
-            clean_p = clean_appx_url(dec_p1)
-            if str(item.get("is_pdf_encrypted")) == "1":
-                key = appx_decrypt(str(item.get("pdf_encryption_key", ""))) if item.get("pdf_encryption_key") else None
-                outputs.append(f"{Title} (PDF):{clean_p}*{key}\n" if key else f"{Title} (PDF):{clean_p}\n")
-            else:
-                outputs.append(f"{Title} (PDF):{clean_p}\n")
-
-    # 2. PDF 2 Extraction
-    p2 = item.get("pdf_link2")
-    if p2:
-        dec_p2 = appx_decrypt(str(p2))
-        if dec_p2 and dec_p2.endswith(".pdf"):
-            clean_p = clean_appx_url(dec_p2)
-            if str(item.get("is_pdf2_encrypted")) == "1":
-                key = appx_decrypt(str(item.get("pdf2_encryption_key", ""))) if item.get("pdf2_encryption_key") else None
-                outputs.append(f"{Title} (PDF 2):{clean_p}*{key}\n" if key else f"{Title} (PDF 2):{clean_p}\n")
-            else:
-                outputs.append(f"{Title} (PDF 2):{clean_p}\n")
-
-    # 3. Image / Thumbnail
-    material_type = str(item.get("material_type") or item.get("type") or "").upper()
-    if material_type == "IMAGE":
-        thumbnail = item.get("thumbnail") or item.get("imageUrl")
-        if thumbnail:
-            outputs.append(f"{Title}:{clean_appx_url(thumbnail)}\n")
-
-    # 4. Video Extraction: Prioritize active HLS streams, direct video URLs, and recording master playlists
-    video_url = None
-    candidate_urls = []
-
-    # Priority 1: Direct recording HLS, active stream URLs, and video endpoints
-    for field in [
-        "recording_hls", "recordingHls", "video_url", "videoUrl", "hls_url", "hlsUrl",
-        "stream_url", "streamUrl", "file_link", "fileUrl", "url", "video_link", "videoLink"
-    ]:
-        val = item.get(field)
-        if val:
-            dec = appx_decrypt(str(val))
-            if dec and (dec.startswith("http") or dec.startswith("//")):
-                url_str = f"https:{dec}" if dec.startswith("//") else clean_appx_url(dec)
-                candidate_urls.append(url_str)
-
-    # Priority 2: Multi-bitrate download links
-    if item.get("download_links") and isinstance(item["download_links"], list):
-        for dl in item["download_links"]:
-            path = dl.get("path") or dl.get("url")
-            if path:
-                dec = appx_decrypt(str(path))
-                if dec and (dec.startswith("http") or dec.startswith("//")):
-                    url_str = f"https:{dec}" if dec.startswith("//") else clean_appx_url(dec)
-                    candidate_urls.append(url_str)
-
-    if item.get("download_link"):
-        dec = appx_decrypt(str(item["download_link"]))
-        if dec and (dec.startswith("http") or dec.startswith("//")):
-            url_str = f"https:{dec}" if dec.startswith("//") else clean_appx_url(dec)
-            candidate_urls.append(url_str)
-
-    # Select the highest quality valid candidate URL
-    if candidate_urls:
-        video_url = candidate_urls[0]
-
-    if video_url:
-        outputs.append(f"{Title}:{video_url}\n")
-
-    return outputs
-
-
 async def fetch_appx_video_id_details_v2(session: aiohttp.ClientSession, api: str, selected_batch_id: str, video_id: str, ytFlag: str, headers: Dict, folder_wise_course: Any, user_id: int) -> List[str]:
     try:
         headers_noauth = {k: v for k, v in headers.items() if k.lower() not in ('authorization', 'user-id')}
+        
         res = await fetch_appx_html_to_json(session, f"{api}/get/fetchVideoDetailsById?course_id={selected_batch_id}&folder_wise_course={folder_wise_course}&ytflag={ytFlag}&video_id={video_id}", headers)
-        if not res or res.get('status') != 200 or not res.get('data'):
+        if not res or res.get('status') != 200:
             res = await fetch_appx_html_to_json(session, f"{api}/get/fetchVideoDetailsById?course_id={selected_batch_id}&folder_wise_course={folder_wise_course}&ytflag={ytFlag}&video_id={video_id}", headers_noauth)
 
-        if res and isinstance(res.get('data'), dict):
-            extracted = extract_appx_item_links(res['data'], api)
-            if extracted:
-                return extracted
-
-        # Fallback to DRM endpoint
-        res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?videoid={video_id}&folder_wise_course={folder_wise_course}", headers)
-        if not res_drm or res_drm.get('status') != 200:
-            res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?videoid={video_id}&folder_wise_course={folder_wise_course}", headers_noauth)
-        
         output = []
-        if res_drm and res_drm.get('data') and isinstance(res_drm['data'], list):
-            Title = f"Video {video_id}"
-            for item in res_drm['data']:
-                if isinstance(item, dict):
-                    for field in ['path', 'url', 'videoUrl', 'hlsUrl', 'mpdUrl', 'streamUrl', 'mediaUrl', 'downloadUrl', 'fileUrl', 'link', 'src']:
-                        val = item.get(field)
-                        if val:
-                            dec = appx_decrypt(str(val))
-                            if dec and (dec.startswith('http') or dec.startswith('//')):
-                                output.append(f"{Title}:{f'https:{dec}' if dec.startswith('//') else clean_appx_url(dec)}\n")
-                                break
-                    if output:
-                        break
+        if res and res.get('data'):
+            data = res.get('data')
+            Title = data.get("Title", f"Video {video_id}").strip()
+            
+            direct_video_url = (
+                data.get('video_url') or data.get('videoUrl') or data.get('hls_url')
+                or data.get('hlsUrl') or data.get('stream_url') or data.get('streamUrl')
+                or data.get('media_url') or data.get('mediaUrl') or data.get('mpd_url')
+                or data.get('mpdUrl') or data.get('download_url') or data.get('downloadUrl')
+                or data.get('url') or data.get('file_url') or data.get('fileUrl')
+                or data.get('source_url') or data.get('sourceUrl') or data.get('path')
+                or data.get('link') or data.get('src') or data.get('video_link') or data.get('videoLink') or ""
+            )
+            
+            if direct_video_url:
+                output.append(f"{Title}:{clean_appx_url(direct_video_url)}\n")
+            else:
+                res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?videoid={video_id}&folder_wise_course={folder_wise_course}", headers)
+                if not res_drm or res_drm.get('status') != 200:
+                    res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?videoid={video_id}&folder_wise_course={folder_wise_course}", headers_noauth)
+                
+                if res_drm:
+                    drm_data = res_drm.get('data', [])
+                    if drm_data and isinstance(drm_data, list) and len(drm_data) > 0:
+                        path = appx_decrypt(drm_data[0].get("path", "")) if drm_data[0].get("path") else None
+                        if path:
+                            output.append(f"{Title}:{clean_appx_url(path)}\n")
+                    
+                    if not output and drm_data and isinstance(drm_data, list):
+                        for item in drm_data:
+                            for field in ['path', 'url', 'videoUrl', 'hlsUrl', 'mpdUrl', 'streamUrl', 'mediaUrl', 'downloadUrl', 'fileUrl', 'link', 'src']:
+                                val = item.get(field)
+                                if val:
+                                    try:
+                                        decrypted = appx_decrypt(val) if val else None
+                                        if decrypted and (decrypted.startswith('http') or decrypted.startswith('//')):
+                                            if decrypted.startswith('//'):
+                                                decrypted = f"https:{decrypted}"
+                                            output.append(f"{Title}:{clean_appx_url(decrypted)}\n")
+                                            break
+                                    except Exception:
+                                        if val.startswith('http') or val.startswith('//'):
+                                            if val.startswith('//'):
+                                                val = f"https:{val}"
+                                            output.append(f"{Title}:{clean_appx_url(val)}\n")
+                                            break
+            
+            pdf_link = appx_decrypt(data.get("pdf_link", "")) if data.get("pdf_link", "") and appx_decrypt(data.get("pdf_link", "")).endswith(".pdf") else None
+            if pdf_link:
+                if str(data.get("is_pdf_encrypted", 0)) == "1":
+                    key = appx_decrypt(data.get("pdf_encryption_key", "")) if data.get("pdf_encryption_key") else None
+                    output.append(f"{Title}:{clean_appx_url(pdf_link)}*{key}\n" if key else f"{Title}:{clean_appx_url(pdf_link)}\n")
+                else:
+                    output.append(f"{Title}:{clean_appx_url(pdf_link)}\n")
+
+            pdf_link2 = appx_decrypt(data.get("pdf_link2", "")) if data.get("pdf_link2", "") and appx_decrypt(data.get("pdf_link2", "")).endswith(".pdf") else None
+            if pdf_link2:
+                if str(data.get("is_pdf2_encrypted", 0)) == "1":
+                    key = appx_decrypt(data.get("pdf2_encryption_key", "")) if data.get("pdf2_encryption_key") else None
+                    output.append(f"{Title}:{clean_appx_url(pdf_link2)}*{key}\n" if key else f"{Title}:{clean_appx_url(pdf_link2)}\n")
+                else:
+                    output.append(f"{Title}:{clean_appx_url(pdf_link2)}\n")
         return output
     except Exception as e:
         return [f"User ID: {user_id} - Error fetching details for Course_id : {selected_batch_id}, video ID {video_id}: {str(e)}\n"]
@@ -540,18 +326,23 @@ async def fetch_appx_folder_contents_v2(session: aiohttp.ClientSession, api: str
         tasks, output = [], []
         if res and "data" in res and isinstance(res["data"], list):
             for item in res["data"]:
-                video_id = item.get("id") or item.get("_id")
+                video_id = item.get("id")
                 ytFlag = item.get("ytFlag", "0")
-                material_type = str(item.get("material_type") or item.get("type") or "").upper()
+                mat_type = str(item.get("material_type") or "").upper()
+                Title = (item.get("Title") or item.get("title") or f"Item {video_id}").strip()
 
-                if material_type == "FOLDER" or (not material_type and not item.get("pdf_link") and not item.get("download_links") and not item.get("video_url")):
-                    tasks.append(fetch_appx_folder_contents_v2(session, api, selected_batch_id, video_id, headers, folder_wise_course, user_id))
-                else:
-                    item_links = extract_appx_item_links(item, api)
-                    if item_links:
-                        output.extend(item_links)
-                    elif video_id:
-                        tasks.append(fetch_appx_video_id_details_v2(session, api, selected_batch_id, str(video_id), str(ytFlag), headers, folder_wise_course, user_id))
+                if mat_type in ("PDF", "TEST"):
+                    pdf_link = appx_decrypt(item.get("pdf_link", "")) if item.get("pdf_link", "") and appx_decrypt(item.get("pdf_link", "")).endswith(".pdf") else None
+                    if pdf_link:
+                        if str(item.get("is_pdf_encrypted")) == "1":
+                            key = appx_decrypt(item.get("pdf_encryption_key", ""))
+                            output.append(f"{Title}:{clean_appx_url(pdf_link)}*{key}\n" if key else f"{Title}:{clean_appx_url(pdf_link)}\n")
+                        else:
+                            output.append(f"{Title}:{clean_appx_url(pdf_link)}\n")
+                elif mat_type == "VIDEO":
+                    tasks.append(fetch_appx_video_id_details_v2(session, api, selected_batch_id, str(video_id), str(ytFlag), headers, folder_wise_course, user_id))
+                elif mat_type == "FOLDER":
+                    tasks.append(fetch_appx_folder_contents_v2(session, api, selected_batch_id, str(video_id), headers, folder_wise_course, user_id))
 
         if tasks:
             results = await asyncio.gather(*tasks)
@@ -581,14 +372,55 @@ async def process_folder_wise_course_0(session: aiohttp.ClientSession, api: str,
                     res3 = await fetch_appx_html_to_json(session, f"{api}/get/livecourseclassbycoursesubtopconceptapiv3?topicid={topicid}&start=-1&courseid={selected_batch_id}&subjectid={subjectid}", headers)
                     if res3 and "data" in res3 and isinstance(res3["data"], list):
                         for item in res3["data"]:
-                            item_links = extract_appx_item_links(item, api)
-                            if item_links:
-                                all_outputs.extend(item_links)
-                            else:
-                                video_id = item.get("id") or item.get("_id")
-                                ytFlag = item.get("ytFlag", "0")
-                                if selected_batch_id is not None and video_id is not None:
-                                    tasks.append(fetch_appx_video_id_details_v3(session, api, selected_batch_id, str(video_id), str(ytFlag), headers, user_id))
+                            Title = (item.get("Title") or item.get("title") or "").strip()
+                            video_id = item.get("id")
+                            ytFlag = item.get("ytFlag", "0")
+                            mat_type = str(item.get("material_type") or "").upper()
+
+                            if mat_type in ("PDF", "TEST"):
+                                pdf_link = appx_decrypt(item.get("pdf_link", "")) if item.get("pdf_link", "") and appx_decrypt(item.get("pdf_link", "")).endswith(".pdf") else None
+                                if pdf_link:
+                                    if str(item.get("is_pdf_encrypted")) == "1":
+                                        key = appx_decrypt(item.get("pdf_encryption_key", ""))
+                                        all_outputs.append(f"{Title}:{clean_appx_url(pdf_link)}*{key}\n" if key else f"{Title}:{clean_appx_url(pdf_link)}\n")
+                                    else:
+                                        all_outputs.append(f"{Title}:{clean_appx_url(pdf_link)}\n")
+                                        
+                                pdf_link2 = appx_decrypt(item.get("pdf_link2", "")) if item.get("pdf_link2", "") and appx_decrypt(item.get("pdf_link2", "")).endswith(".pdf") else None
+                                if pdf_link2:
+                                    if str(item.get("is_pdf2_encrypted")) == "1":
+                                        key = appx_decrypt(item.get("pdf2_encryption_key", ""))
+                                        all_outputs.append(f"{Title}:{clean_appx_url(pdf_link2)}*{key}\n" if key else f"{Title}:{clean_appx_url(pdf_link2)}\n")
+                                    else:
+                                        all_outputs.append(f"{Title}:{clean_appx_url(pdf_link2)}\n")
+
+                            elif mat_type == "IMAGE":
+                                thumbnail = item.get("thumbnail")
+                                if thumbnail:
+                                    all_outputs.append(f"{Title}:{clean_appx_url(thumbnail)}\n")
+                                    
+                            elif mat_type == "VIDEO":
+                                direct_video_url = (
+                                    item.get('video_url') or item.get('videoUrl') or item.get('hls_url')
+                                    or item.get('hlsUrl') or item.get('stream_url') or item.get('streamUrl')
+                                    or item.get('media_url') or item.get('mediaUrl') or item.get('mpd_url')
+                                    or item.get('mpdUrl') or item.get('download_url') or item.get('downloadUrl')
+                                    or item.get('url') or item.get('file_url') or item.get('fileUrl')
+                                    or item.get('video_link') or item.get('videoLink') or item.get('source_url')
+                                    or item.get('sourceUrl') or item.get('path') or item.get('link') or item.get('src')
+                                )
+                                if not direct_video_url:
+                                    direct_video_url = (
+                                        appx_decrypt(item.get("pdf_link", "")) if item.get("pdf_link") and not appx_decrypt(item.get("pdf_link", "")).endswith(".pdf") else None
+                                        or appx_decrypt(item.get("pdf_link2", "")) if item.get("pdf_link2") and not appx_decrypt(item.get("pdf_link2", "")).endswith(".pdf") else None
+                                        or appx_decrypt(item.get("file_link", "")) if item.get("file_link") else None
+                                    )
+                                
+                                if direct_video_url:
+                                    all_outputs.append(f"{Title}:{clean_appx_url(direct_video_url)}\n")
+                                else:
+                                    if selected_batch_id is not None and video_id is not None:
+                                        tasks.append(fetch_appx_video_id_details_v3(session, api, selected_batch_id, str(video_id), str(ytFlag), headers, user_id))
 
     if tasks:
         results = await asyncio.gather(*tasks)
@@ -599,7 +431,6 @@ async def process_folder_wise_course_0(session: aiohttp.ClientSession, api: str,
     return all_outputs
 
 async def process_folder_wise_course_1(session: aiohttp.ClientSession, api: str, selected_batch_id: str, headers: Dict, user_id: int) -> List[str]:
-    # Try parent_id=-1 first, if empty try parent_id=0 for Classx/Appx compatibility
     res = await fetch_appx_html_to_json(session, f"{api}/get/folder_contentsv2?course_id={selected_batch_id}&parent_id=-1", headers)
     if not res or not res.get("data"):
         res = await fetch_appx_html_to_json(session, f"{api}/get/folder_contentsv2?course_id={selected_batch_id}&parent_id=0", headers)
@@ -608,18 +439,56 @@ async def process_folder_wise_course_1(session: aiohttp.ClientSession, api: str,
     
     if res and "data" in res and isinstance(res["data"], list):
         for item in res["data"]:
-            video_id = item.get("id") or item.get("_id")
+            Title = (item.get("Title") or item.get("title") or "").strip()
+            video_id = item.get("id")
             ytFlag = item.get("ytFlag", "0")
-            material_type = str(item.get("material_type") or item.get("type") or "").upper()
+            mat_type = str(item.get("material_type") or "").upper()
             
-            if material_type == "FOLDER" or (not material_type and not item.get("pdf_link") and not item.get("download_links") and not item.get("video_url")):
-                tasks.append(fetch_appx_folder_contents_v2(session, api, selected_batch_id, video_id, headers, 1, user_id))
-            else:
-                item_links = extract_appx_item_links(item, api)
-                if item_links:
-                    all_outputs.extend(item_links)
-                elif video_id:
+            if mat_type in ("PDF", "TEST"):
+                pdf_link = appx_decrypt(item.get("pdf_link", "")) if item.get("pdf_link", "") and appx_decrypt(item.get("pdf_link", "")).endswith(".pdf") else None
+                if pdf_link:
+                    if str(item.get("is_pdf_encrypted")) == "1":
+                        key = appx_decrypt(item.get("pdf_encryption_key", ""))
+                        all_outputs.append(f"{Title}:{clean_appx_url(pdf_link)}*{key}\n" if key else f"{Title}:{clean_appx_url(pdf_link)}\n")
+                    else:
+                        all_outputs.append(f"{Title}:{clean_appx_url(pdf_link)}\n")
+                        
+                pdf_link2 = appx_decrypt(item.get("pdf_link2", "")) if item.get("pdf_link2", "") and appx_decrypt(item.get("pdf_link2", "")).endswith(".pdf") else None
+                if pdf_link2:
+                    if str(item.get("is_pdf2_encrypted")) == "1":
+                        key = appx_decrypt(item.get("pdf2_encryption_key", ""))
+                        all_outputs.append(f"{Title}:{clean_appx_url(pdf_link2)}*{key}\n" if key else f"{Title}:{clean_appx_url(pdf_link2)}\n")
+                    else:
+                        all_outputs.append(f"{Title}:{clean_appx_url(pdf_link2)}\n")
+
+            elif mat_type == "IMAGE":
+                thumbnail = item.get("thumbnail")
+                if thumbnail:
+                    all_outputs.append(f"{Title}:{clean_appx_url(thumbnail)}\n")
+                   
+            elif mat_type == "VIDEO":
+                direct_video_url = (
+                    item.get('video_url') or item.get('videoUrl') or item.get('hls_url')
+                    or item.get('hlsUrl') or item.get('stream_url') or item.get('streamUrl')
+                    or item.get('media_url') or item.get('mediaUrl') or item.get('mpd_url')
+                    or item.get('mpdUrl') or item.get('download_url') or item.get('downloadUrl')
+                    or item.get('url') or item.get('file_url') or item.get('fileUrl')
+                    or item.get('video_link') or item.get('videoLink') or item.get('source_url')
+                    or item.get('sourceUrl') or item.get('path') or item.get('link') or item.get('src')
+                )
+                if not direct_video_url:
+                    direct_video_url = (
+                        appx_decrypt(item.get("pdf_link", "")) if item.get("pdf_link") and not appx_decrypt(item.get("pdf_link", "")).endswith(".pdf") else None
+                        or appx_decrypt(item.get("pdf_link2", "")) if item.get("pdf_link2") and not appx_decrypt(item.get("pdf_link2", "")).endswith(".pdf") else None
+                        or appx_decrypt(item.get("file_link", "")) if item.get("file_link") else None
+                    )
+                if direct_video_url:
+                    all_outputs.append(f"{Title}:{clean_appx_url(direct_video_url)}\n")
+                else:
                     tasks.append(fetch_appx_video_id_details_v2(session, api, selected_batch_id, str(video_id), str(ytFlag), headers, 1, user_id))
+
+            elif mat_type == "FOLDER":
+                tasks.append(fetch_appx_folder_contents_v2(session, api, selected_batch_id, str(item.get("id")), headers, 1, user_id))
 
     if tasks:
         results = await asyncio.gather(*tasks)
@@ -629,7 +498,6 @@ async def process_folder_wise_course_1(session: aiohttp.ClientSession, api: str,
 
     return all_outputs
 
-
 async def process_appxwp(bot: Client, m: Message, user_id: int):
     editable = await m.reply_text("**Wait initializing process... ⏳**")
     clean_file_name = None
@@ -637,7 +505,6 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
     try:
         connector = aiohttp.TCPConnector(limit=100)
         async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=60)) as session:
-            
             auth_prompt = (
                 "**Select Appx Authentication Option:**\n\n"
                 "**1. 🔑 Login with Credentials (Mobile & Password)**\n"
@@ -659,7 +526,6 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
                 if first_input.count('.') == 2 and len(first_input) > 100:
                     token = first_input
                     extracted_jwt_userid = extract_user_id_from_jwt(token)
-                    
                     second_input = await prompt_user(
                         bot, m, editable,
                         f"**Token received! (Detected User ID: `{extracted_jwt_userid}`)\nNow enter App Name or API URL:**",
@@ -673,168 +539,124 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
                 return
 
             extracted_jwt_userid = extract_user_id_from_jwt(token) if token else "0"
-            formatted_token = f"{token}" if token and not token.startswith("Bearer ") else token
 
             headers = {
                 "Client-Service": "Appx",
                 "Auth-Key": "appxapi",
                 "source": "website",
+                "User-ID": str(extracted_jwt_userid)
             }
             if token:
-                headers['Authorization'] = formatted_token
-                headers['User-ID'] = extracted_jwt_userid
+                headers["Authorization"] = token
 
-            try: await editable.delete()
-            except: pass
-            editable = await m.reply_text("**Fetching Available Courses... 🔍**")
-            res1 = await fetch_appx_html_to_json(session, f"{api}/get/courselist", headers)
-            res2 = await fetch_appx_html_to_json(session, f"{api}/get/courselistnewv2", headers)
+            course_type = await prompt_user(
+                bot, m, editable,
+                f"**Connected to:** `{selected_app_name}`\n\n"
+                f"Select Course Extraction Mode:\n\n"
+                f"**1. 📚 My / Purchased Courses**\n"
+                f"**2. 🌐 All / Public Courses (No Login Required)**",
+                user_id
+            )
 
-            courses1 = res1.get("data", []) if res1 and res1.get('status') == 200 and isinstance(res1.get("data"), list) else []
-            courses2 = res2.get("data", []) if res2 and res2.get('status') == 200 and isinstance(res2.get("data"), list) else []
-            courses3 = []
+            if course_type == "1":
+                if not token:
+                    token = await prompt_user(bot, m, editable, "**Send Token for Purchased Courses:**", user_id)
+                    extracted_jwt_userid = extract_user_id_from_jwt(token)
+                    headers["Authorization"] = token
+                    headers["User-ID"] = str(extracted_jwt_userid)
+                api_endpoint = f"{api}/get/mycourse"
+            else:
+                api_endpoint = f"{api}/get/allcourse2"
 
-            if token:
-                res3 = await fetch_appx_html_to_json(session, f"{api}/get/mycourse?userid={extracted_jwt_userid}", headers)
-                if not res3 or res3.get('status') != 200 or not res3.get("data"):
-                    res3 = await fetch_appx_html_to_json(session, f"{api}/get/mycourse", headers)
-                if res3 and res3.get('status') == 200 and isinstance(res3.get("data"), list):
-                    courses3 = res3.get("data", [])
+            await editable.edit("🔍 **Fetching courses list... ⏳**")
+            res = await fetch_appx_html_to_json(session, api_endpoint, headers=headers)
 
-            combined = courses3 + courses1 + courses2
-            seen_ids = set()
-            courses = []
-            for c in combined:
-                if isinstance(c, dict):
-                    cid = str(c.get("id"))
-                    if cid and cid not in seen_ids:
-                        courses.append(c)
-                        seen_ids.add(cid)
+            if not res or not res.get("data"):
+                if course_type == "1":
+                    res = await fetch_appx_html_to_json(session, f"{api}/get/allcourse2", headers=headers)
 
-            if not courses:
-                await editable.edit("**Did not find any course! ❌\nCheck if token is expired or if the App API endpoint is valid.**")
+            if not res or not res.get("data"):
+                await editable.edit("**No courses found or Token/API expired! ❌**")
                 return
 
-            total = len(courses)
-            if total > 50:
-                text = ""
-                for cnt, course in enumerate(courses):
-                    text += f"{cnt + 1}. {course.get('course_name', 'Unnamed Course')} 💵₹{course.get('price', '0')}\n"
+            course_data = res["data"]
+            if not isinstance(course_data, list):
+                course_data = [course_data]
 
-                course_details_file = f"{user_id}_paid_course_details.txt"
-                with open(course_details_file, 'w', encoding='utf-8') as f:
-                    f.write(text)
+            courses_text = f"**Available Courses for {selected_app_name}:**\n\n"
+            for cnt, item in enumerate(course_data):
+                c_name = item.get("course_name") or item.get("name") or "Unnamed Course"
+                c_id = item.get("id") or item.get("course_id")
+                courses_text += f"<blockquote>**{cnt + 1}.** `{c_name}` (ID: `{c_id}`)</blockquote>\n"
 
-                caption = f"**App Name:** `{selected_app_name}`\n**Batch Name:** `Course Details`"
-
-                try:
-                    with open(course_details_file, 'rb') as f:
-                        await m.reply_document(document=f, caption=caption, file_name="course_details.txt")
-                    
-                    await editable.delete()
-                    editable = await m.reply_text("📂 **Course list sent above as document. Send index number here:**")
-                finally:
-                    if os.path.exists(course_details_file):
-                        os.remove(course_details_file)
-
-                selection_course = await prompt_user(bot, m, editable, "**Send index number from the course details file which i just send you:**", user_id)
-            else:
-                text = ""
-                for cnt, course in enumerate(courses):
-                    text += f"<blockquote>**{cnt + 1}.** `{course.get('course_name', 'Unnamed Course')} 💵₹{course.get('price', '0')}`</blockquote>\n"
-                selection_course = await prompt_user(bot, m, editable, f"**Send index number of the course to download:**\n\n{text}", user_id)
-
-            if selection_course.isdigit() and 1 <= int(selection_course) <= len(courses):
-                selected_course_index = int(selection_course) - 1
-                course = courses[selected_course_index]
-                selected_batch_id = course['id']
-                selected_batch_name = course.get('course_name', 'Batch')
-                folder_wise_course = course.get("folder_wise_course", "")
-                
-                clean_batch_name = selected_batch_name.replace('/', '-').replace('|', '-')[:244]
-                clean_file_name = f"{user_id}_{clean_batch_name}"
-            else:
-                await editable.edit("**Invalid Selection Index! ❌**")
+            selection_idx = await prompt_user(bot, m, editable, f"{courses_text}\n**Send Course Index Number to Extract:**", user_id)
+            if not selection_idx.isdigit() or int(selection_idx) < 1 or int(selection_idx) > len(course_data):
+                await editable.edit("**Invalid course selection! ❌**")
                 return
 
+            selected_course = course_data[int(selection_idx) - 1]
+            selected_batch_id = str(selected_course.get("id") or selected_course.get("course_id"))
+            selected_course_name = selected_course.get("course_name") or selected_course.get("name") or "Course"
+            folder_wise_course = selected_course.get("folder_wise_course", 0)
+
+            clean_file_name = re.sub(r'[\\/*?:"<>|]', "", selected_course_name).strip().replace(" ", "_")
+            if not clean_file_name:
+                clean_file_name = f"Appx_Course_{selected_batch_id}"
+
+            await editable.edit(f"⏳ **Extracting contents for:** `{selected_course_name}`\n*Resolving video streams & notes...*")
             start_time = time.time()
-            await update_status_card(editable, f"Extracting: {selected_batch_name}", 0, 100, start_time, "Initializing extraction...")
 
-            extraction_headers = {
-                "Client-Service": "Appx",
-                "Auth-Key": "appxapi",
-                "source": "website",
-            }
-            if token:
-                extraction_headers["Authorization"] = formatted_token
-                extraction_headers["User-ID"] = extracted_jwt_userid
-
-            all_outputs = []
-
-            # Always try folder structure first for Classx apps, then live course items if needed
-            await update_status_card(editable, f"Extracting: {selected_batch_name}", 20, 100, start_time, "Extracting folder contents...")
-            all_outputs = await process_folder_wise_course_1(session, api, selected_batch_id, extraction_headers, user_id)
-            
-            if not all_outputs:
-                await update_status_card(editable, f"Extracting: {selected_batch_name}", 40, 100, start_time, "Extracting live/subject course items...")
-                all_outputs = await process_folder_wise_course_0(session, api, selected_batch_id, extraction_headers, user_id)
-
-            if all_outputs:
-                output_txt_path = f"{clean_file_name}.txt"
-                with open(output_txt_path, 'w', encoding='utf-8') as f:
-                    for output_line in all_outputs:
-                        f.write(output_line)
-
-                time_taken = format_time(time.time() - start_time)
-                caption = f"**App Name:** `{selected_app_name}`\n**Batch Name:** `{selected_batch_name}`\n**Time Taken:** `{time_taken}`"
-
-                await editable.edit("📤 **Uploading generated document to Telegram...**")
-
-                if os.path.exists(output_txt_path) and os.path.getsize(output_txt_path) > 0:
-                    try:
-                        with open(output_txt_path, "rb") as doc:
-                            await m.reply_document(doc, caption=caption, file_name=f"{clean_batch_name}.txt")
-                        await editable.delete()
-                    except Exception as upload_err:
-                        logging.error(f"Failed to upload output file: {upload_err}")
-                    finally:
-                        if os.path.exists(output_txt_path):
-                            os.remove(output_txt_path)
-                else:
-                    if os.path.exists(output_txt_path):
-                        os.remove(output_txt_path)
-                    await editable.edit("**Extraction completed, but no content was found (0 Bytes output). ❌**")
+            if str(folder_wise_course) == "1":
+                outputs = await process_folder_wise_course_1(session, api, selected_batch_id, headers, user_id)
             else:
-                await editable.edit("**Didn't Find Any Content In The Course! ❌**")
+                outputs = await process_folder_wise_course_0(session, api, selected_batch_id, headers, user_id)
+
+            if not outputs:
+                # Fallback to alternate folder structure if empty
+                if str(folder_wise_course) == "1":
+                    outputs = await process_folder_wise_course_0(session, api, selected_batch_id, headers, user_id)
+                else:
+                    outputs = await process_folder_wise_course_1(session, api, selected_batch_id, headers, user_id)
+
+            if not outputs:
+                await editable.edit("**No lessons, videos, or PDFs found in this course! ❌**")
+                return
+
+            txt_file_path = f"{clean_file_name}.txt"
+            with open(txt_file_path, "w", encoding="utf-8") as f:
+                for line in outputs:
+                    f.write(line)
+
+            elapsed_str = format_time(time.time() - start_time)
+            await send_extracted_text_file(
+                bot, m, editable, txt_file_path,
+                app_name=f"Appx - {selected_app_name}",
+                batch_name=selected_course_name,
+                total_links=len(outputs),
+                elapsed_time=elapsed_str
+            )
 
     except ProcessCancelledException:
-        if clean_file_name:
-            f_path = f"{clean_file_name}.txt"
-            if os.path.exists(f_path):
-                try:
-                    os.remove(f_path)
-                except Exception:
-                    pass
+        pass
     except Exception as e:
-        logging.exception("Error in process_appxwp:")
+        logger.exception("Error during Appx extraction:")
         if editable:
-            await editable.edit(f"**Error : {e}**")
+            try:
+                await editable.edit(f"**Appx Extraction Failed:** `{e}`")
+            except Exception:
+                pass
+    finally:
         if clean_file_name:
-            f_path = f"{clean_file_name}.txt"
-            if os.path.exists(f_path):
-                try:
-                    os.remove(f_path)
-                except Exception:
-                    pass
+            txt_file_path = f"{clean_file_name}.txt"
+            if os.path.exists(txt_file_path):
+                try: os.remove(txt_file_path)
+                except: pass
 
 def register_appxwp_handlers(bot: Client):
-    @bot.on_callback_query(filters.regex("^appxwp$"))
-    async def appxwp_callback(client: Client, callback_query):
-        user_id = callback_query.from_user.id if callback_query.from_user else 0
+    @bot.on_message(filters.command(["three", "appx", "appxwp"]) & filters.private)
+    async def appx_cmd_handler(client: Client, message: Message):
+        user_id = message.from_user.id
         if not is_authorized(user_id):
-            await callback_query.answer("⛔ Access Denied! You are not authorized.", show_alert=True)
+            await message.reply_text("**You are not authorized to use this bot! ❌**")
             return
-        await callback_query.answer()
-        asyncio.create_task(process_appxwp(client, callback_query.message, user_id))
-
-process_appx = process_appxwp
+        await process_appxwp(client, message, user_id)

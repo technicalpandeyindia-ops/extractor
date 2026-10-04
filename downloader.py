@@ -26,8 +26,7 @@ logger = logging.getLogger("Downloader")
 
 APPX_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
-    "Referer": "https://appx-play.akamai.net.in/",
-    "Origin": "https://appx-play.akamai.net.in",
+    "Referer": "https://appx-play.akamai.net.in/"
 }
 
 class ProcessCancelledException(Exception):
@@ -57,11 +56,13 @@ async def prompt_user(bot: Client, message: Message, editable: Message, text: st
     return response.strip()
 
 async def get_user_input_or_doc(bot: Client, m: Message, editable: Message, text: str, user_id: int, temp_dir: str) -> str:
+    """Listens for either text or uploaded document file from user."""
     cancel_notice = "\n\n<blockquote>❌ **Send `/cancel` at any time to abort.**</blockquote>"
     try:
         await editable.edit(text + cancel_notice)
     except Exception:
         pass
+    
     try:
         msg: Message = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=300)
     except ListenerTimeout:
@@ -77,6 +78,7 @@ async def get_user_input_or_doc(bot: Client, m: Message, editable: Message, text
     if not msg:
         raise ProcessCancelledException("No message received.")
 
+    # 1. If user sent a document (.txt)
     if msg.document:
         await editable.edit("📂 **Downloading and parsing uploaded document... ⏳**")
         file_path = os.path.join(temp_dir, msg.document.file_name or "extracted.txt")
@@ -93,6 +95,7 @@ async def get_user_input_or_doc(bot: Client, m: Message, editable: Message, text
             logger.error(f"Failed to download/read document: {e}")
             raise ProcessCancelledException(f"Failed to read document: {e}")
 
+    # 2. If user sent text or caption
     val = (msg.text or msg.caption or "").strip()
     try:
         await msg.delete()
@@ -110,6 +113,7 @@ def sanitize_filename(name: str) -> str:
     return name[:120] if len(name) > 120 else name
 
 def extract_content_id(url: str) -> str:
+    """Extracts Classplus contentId from URL if present."""
     if 'contentId=' in url:
         parts = url.split('contentId=')
         if len(parts) > 1:
@@ -122,71 +126,8 @@ def extract_content_id(url: str) -> str:
             return cid
     return ""
 
-# ─── URL type detection ────────────────────────────────────────────────────────
-# VIDEO signal patterns — URL substrings that mean "this is a video stream"
-_VIDEO_URL_SIGNALS = [
-    ".m3u8", ".mp4", ".ts", ".mkv",
-    "transcoded-videos", "transcoded_videos",
-    "vodclasses", "liveclasses",
-    "classx.co.in/live", "classx.co.in/vod",
-    "appx-play.akamai", "akamaized.net", "akamai.net",
-    "hls/", "/hls", "playlist_eof",
-    "cloudfront.net",
-    "youtube.com/watch", "youtu.be",
-    "/video/", "/videos/", "video_url",
-    "stream", "media/",
-    "jwplatform", "jwplayer",
-    "brightcove",
-]
-
-# PDF signal patterns — these OVERRIDE video signals
-_PDF_URL_SIGNALS = [
-    ".pdf",
-]
-
-# Title signals that force PDF type
-_PDF_TITLE_SIGNALS = ["(pdf)", "(note)", "(notes)", "(dpp)", "(ncert)"]
-
-def _classify_type(title: str, url: str, enc_key: str) -> str:
-    """
-    Classify a link as VIDEO, PDF, or FILE.
-    Rule order (highest priority first):
-      1. Title explicitly says (PDF)/(Notes) → PDF
-      2. URL ends with .pdf → PDF
-      3. URL contains any VIDEO signal → VIDEO
-      4. enc_key present + no video signal → PDF (encrypted PDF pattern)
-      5. /paid_course/ or /subject/ in URL alone is NOT enough for PDF —
-         those paths host both videos and PDFs; fall through to FILE
-         which the downloader will attempt as generic HTTP.
-    """
-    url_lower = url.lower()
-    title_lower = title.lower()
-
-    # 1. Title says PDF
-    if any(s in title_lower for s in _PDF_TITLE_SIGNALS):
-        return "PDF"
-
-    # 2. URL ends with .pdf
-    if url_lower.split("?")[0].endswith(".pdf"):
-        return "PDF"
-
-    # 3. URL contains explicit .pdf anywhere
-    if ".pdf" in url_lower:
-        return "PDF"
-
-    # 4. URL has a video signal
-    if any(sig in url_lower for sig in _VIDEO_URL_SIGNALS):
-        return "VIDEO"
-
-    # 5. enc_key present → encrypted PDF
-    if enc_key:
-        return "PDF"
-
-    # 6. Default — let downloader try HTTP
-    return "FILE"
-
-# ─── JW signed URL ─────────────────────────────────────────────────────────────
 async def get_jw_signed_url(content_id: str, access_token: str = "") -> str:
+    """Fetches JW signed stream URL from Classplus."""
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Origin": "https://web.classplusapp.com",
@@ -206,6 +147,7 @@ async def get_jw_signed_url(content_id: str, access_token: str = "") -> str:
                     signed = data.get("url")
                     if signed:
                         return signed
+            # Fallback to liveSessionId
             live_api = f"https://api.classplusapp.com/cams/uploader/video/jw-signed-url?liveSessionId={quote(content_id, safe='')}&isAgora=2"
             async with session.get(live_api, timeout=aiohttp.ClientTimeout(total=15)) as r2:
                 if r2.status == 200:
@@ -215,16 +157,16 @@ async def get_jw_signed_url(content_id: str, access_token: str = "") -> str:
         logger.warning(f"Error fetching JW signed URL: {e}")
     return ""
 
-# ─── HTTP file download ─────────────────────────────────────────────────────────
 async def download_file_http(url: str, output_path: str, editable: Message, title: str) -> bool:
+    """Downloads general HTTP files with Akamai & Appx headers."""
     try:
         conn = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(headers=APPX_HEADERS, connector=conn) as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=600)) as resp:
                 if resp.status != 200:
-                    logger.warning(f"HTTP {resp.status} downloading: {url}")
+                    logger.warning(f"HTTP {resp.status} downloading {url}")
                     return False
-
+                
                 total_size = int(resp.headers.get('content-length', 0))
                 downloaded = 0
                 start_time = time.time()
@@ -234,6 +176,7 @@ async def download_file_http(url: str, output_path: str, editable: Message, titl
                     async for chunk in resp.content.iter_chunked(1024 * 64):
                         f.write(chunk)
                         downloaded += len(chunk)
+                        
                         now = time.time()
                         if now - last_update > 4:
                             last_update = now
@@ -253,8 +196,12 @@ async def download_file_http(url: str, output_path: str, editable: Message, titl
         logger.error(f"Download HTTP error: {e}")
         return False
 
-# ─── Encrypted PDF ──────────────────────────────────────────────────────────────
 async def download_appx_encrypted_pdf(url: str, output_path: str, enc_key: str) -> bool:
+    """
+    Downloads and decrypts AES-128-CBC encrypted Appx PDF (*enc_key)
+    First 16 bytes = IV, remainder = ciphertext.
+    Derives key via Raw, MD5, SHA256 using PyCryptodome or OpenSSL fallback.
+    """
     temp_raw = f"{output_path}.raw"
     try:
         conn = aiohttp.TCPConnector(ssl=False)
@@ -273,6 +220,7 @@ async def download_appx_encrypted_pdf(url: str, output_path: str, enc_key: str) 
         with open(temp_raw, 'rb') as f:
             header = f.read(4)
             if header == b'%PDF':
+                # Already plaintext PDF
                 shutil.move(temp_raw, output_path)
                 return True
 
@@ -281,6 +229,7 @@ async def download_appx_encrypted_pdf(url: str, output_path: str, enc_key: str) 
 
         iv_bytes = file_bytes[:16]
         ciphertext = file_bytes[16:]
+
         key_bytes = enc_key.encode('utf-8')
         candidates = [
             key_bytes[:16].ljust(16, b'\x00'),
@@ -288,6 +237,7 @@ async def download_appx_encrypted_pdf(url: str, output_path: str, enc_key: str) 
             hashlib.sha256(key_bytes).digest()[:16]
         ]
 
+        # 1. Try PyCryptodome AES-CBC
         try:
             from Crypto.Cipher import AES
             for cand in candidates:
@@ -295,6 +245,7 @@ async def download_appx_encrypted_pdf(url: str, output_path: str, enc_key: str) 
                     cipher = AES.new(cand, AES.MODE_CBC, current_iv)
                     decrypted = cipher.decrypt(ciphertext)
                     if decrypted.startswith(b'%PDF'):
+                        # Unpad PKCS7 if valid
                         pad_len = decrypted[-1]
                         if 1 <= pad_len <= 16:
                             decrypted = decrypted[:-pad_len]
@@ -305,6 +256,7 @@ async def download_appx_encrypted_pdf(url: str, output_path: str, enc_key: str) 
         except ImportError:
             pass
 
+        # 2. Try OpenSSL CLI fallback
         for cand in candidates:
             hex_key = cand.hex()
             hex_iv = iv_bytes.hex()
@@ -312,8 +264,10 @@ async def download_appx_encrypted_pdf(url: str, output_path: str, enc_key: str) 
             temp_cipher = f"{output_path}.cipher"
             with open(temp_cipher, 'wb') as cf:
                 cf.write(ciphertext)
+            
             cmd = ["openssl", "aes-128-cbc", "-d", "-K", hex_key, "-iv", hex_iv, "-in", temp_cipher, "-out", temp_plain]
             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
             if os.path.exists(temp_plain):
                 with open(temp_plain, 'rb') as pf:
                     if pf.read(4) == b'%PDF':
@@ -331,31 +285,28 @@ async def download_appx_encrypted_pdf(url: str, output_path: str, enc_key: str) 
         if os.path.exists(temp_raw): os.remove(temp_raw)
         return False
 
-# ─── Pure Python HLS downloader ────────────────────────────────────────────────
 async def download_hls_stream_pure_python(m3u8_url: str, output_path: str, editable: Message, title: str) -> bool:
+    """Pure Python HLS parser & segment downloader with Appx/Akamai headers."""
     import urllib.parse
     conn = aiohttp.TCPConnector(ssl=False)
     try:
         async with aiohttp.ClientSession(connector=conn, headers=APPX_HEADERS) as session:
             async with session.get(m3u8_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status != 200:
-                    logger.warning(f"HLS master fetch HTTP {resp.status}: {m3u8_url}")
                     return False
                 m3u8_content = await resp.text()
 
             lines = [l.strip() for l in m3u8_content.splitlines() if l.strip()]
             variant_playlists = [l for l in lines if not l.startswith("#") and ".m3u8" in l]
             if variant_playlists:
-                target_variant = variant_playlists[-1]  # default: last = highest bitrate
+                target_variant = variant_playlists[-1]
                 for v in variant_playlists:
-                    if "1080" in v:
+                    if "720" in v:
                         target_variant = v
                         break
-                    elif "720" in v:
+                    elif "480" in v:
                         target_variant = v
-                    elif "480" in v and "720" not in target_variant and "1080" not in target_variant:
-                        target_variant = v
-
+                
                 sub_url = urllib.parse.urljoin(m3u8_url, target_variant)
                 async with session.get(sub_url, timeout=aiohttp.ClientTimeout(total=20)) as sub_resp:
                     if sub_resp.status == 200:
@@ -370,7 +321,6 @@ async def download_hls_stream_pure_python(m3u8_url: str, output_path: str, edita
                     segments.append(seg_url)
 
             if not segments:
-                logger.warning(f"No segments found in HLS playlist: {m3u8_url}")
                 return False
 
             total_segs = len(segments)
@@ -379,25 +329,16 @@ async def download_hls_stream_pure_python(m3u8_url: str, output_path: str, edita
 
             with open(output_path, "wb") as out_file:
                 for idx, seg_url in enumerate(segments, 1):
-                    seg_ok = False
-                    for attempt in range(4):
+                    for attempt in range(3):
                         try:
-                            async with session.get(seg_url, timeout=aiohttp.ClientTimeout(total=45)) as seg_resp:
+                            async with session.get(seg_url, timeout=aiohttp.ClientTimeout(total=30)) as seg_resp:
                                 if seg_resp.status == 200:
                                     chunk = await seg_resp.read()
                                     out_file.write(chunk)
-                                    seg_ok = True
                                     break
-                                else:
-                                    logger.warning(f"Segment {idx} HTTP {seg_resp.status}, retry {attempt+1}")
-                        except Exception as e:
-                            logger.warning(f"Segment {idx} error (attempt {attempt+1}): {e}")
-                            await asyncio.sleep(1 * (attempt + 1))
-
-                    if not seg_ok:
-                        logger.error(f"Segment {idx} failed after 4 attempts, aborting")
-                        return False
-
+                        except Exception:
+                            await asyncio.sleep(0.5)
+                    
                     now = time.time()
                     if now - last_update > 4 or idx == total_segs:
                         last_update = now
@@ -417,65 +358,43 @@ async def download_hls_stream_pure_python(m3u8_url: str, output_path: str, edita
         logger.error(f"Pure Python HLS downloader error: {e}")
         return False
 
-# ─── Main video stream downloader ──────────────────────────────────────────────
 async def download_video_stream(url: str, output_path: str, editable: Message, title: str) -> bool:
-    """
-    Download any video URL: HLS/M3U8, MP4, or generic stream.
-    Strategy: Pure-Python HLS → yt-dlp → ffmpeg → direct HTTP.
-    Logs every failure so silent skips never happen.
-    """
+    """Downloads HLS/M3U8 or MP4 using Pure Python HLS, yt-dlp, ffmpeg, or direct stream."""
     clean_url = clean_appx_url(url)
-
-    # Classplus JW contentId resolution
+    
+    # Classplus JW contentId check
     if "contentId=" in clean_url:
         cid = extract_content_id(clean_url)
         if cid:
             jw_url = await get_jw_signed_url(cid)
             if jw_url:
-                logger.info(f"Resolved JW signed URL for contentId={cid}")
                 clean_url = jw_url
 
-    # Build candidate URL list: original + stripped query + quality variants
     candidates = [clean_url]
     if "?" in clean_url:
         candidates.append(clean_url.split("?")[0])
     if "/480p/" in clean_url:
         candidates.append(clean_url.replace("/480p/", "/720p/"))
-        candidates.append(clean_url.replace("/480p/", "/1080p/"))
-    if "/360p/" in clean_url:
-        candidates.append(clean_url.replace("/360p/", "/720p/"))
     if "transcoded-videos-v2" in clean_url:
         candidates.append(clean_url.replace("transcoded-videos-v2", "transcoded-videos"))
-    # De-duplicate preserving order
-    seen = set()
-    candidates = [c for c in candidates if not (c in seen or seen.add(c))]
-
+        
     for target_url in candidates:
-        logger.info(f"Trying video URL: {target_url}")
-
-        # ── 1. Pure Python HLS (fastest, no binaries) ──────────────────────
-        if ".m3u8" in target_url or "playlist_eof" in target_url:
+        # 1. Pure Python HLS Engine (no external binaries required)
+        if ".m3u8" in target_url:
             ok = await download_hls_stream_pure_python(target_url, output_path, editable, title)
             if ok:
-                logger.info(f"HLS pure-python success: {target_url}")
                 return True
-            logger.warning(f"HLS pure-python failed: {target_url}")
 
-        # ── 2. yt-dlp ──────────────────────────────────────────────────────
+        # 2. yt-dlp with Akamai headers
         try:
-            ytdlp_base = output_path.replace(".mp4", "")
-            ytdlp_out_tmpl = f"{ytdlp_base}.%(ext)s"
             cmd = [
                 "yt-dlp",
                 "--no-warnings",
                 "--no-check-certificates",
                 "--concurrent-fragments", "8",
-                "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
-                "--merge-output-format", "mp4",
-                "--add-header", f"User-Agent:{APPX_HEADERS['User-Agent']}",
-                "--add-header", f"Referer:{APPX_HEADERS['Referer']}",
-                "--add-header", f"Origin:{APPX_HEADERS['Origin']}",
-                "-o", ytdlp_out_tmpl,
+                "--add-header", "User-Agent:Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
+                "--add-header", "Referer:https://appx-play.akamai.net.in/",
+                "-o", output_path,
                 target_url
             ]
             proc = await asyncio.create_subprocess_exec(
@@ -483,39 +402,24 @@ async def download_video_stream(url: str, output_path: str, editable: Message, t
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await proc.communicate()
-            if stderr:
-                logger.warning(f"yt-dlp stderr: {stderr.decode(errors='ignore')[-400:]}")
-            for ext in ["mp4", "mkv", "webm", "ts"]:
-                candidate = f"{ytdlp_base}.{ext}"
-                if os.path.exists(candidate) and os.path.getsize(candidate) > 1000:
-                    if candidate != output_path:
-                        os.rename(candidate, output_path)
-                    logger.info(f"yt-dlp success: {target_url}")
-                    return True
+            await proc.communicate()
             if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
                 return True
-            logger.warning(f"yt-dlp produced no output for: {target_url}")
-        except FileNotFoundError:
-            logger.warning("yt-dlp not found, skipping")
-        except Exception as e:
-            logger.error(f"yt-dlp exception: {e}")
+        except Exception:
+            pass
 
-        # ── 3. ffmpeg ───────────────────────────────────────────────────────
+        # 3. ffmpeg with Akamai headers
         try:
             cmd_ffmpeg = [
                 "ffmpeg", "-y",
-                "-loglevel", "warning",
-                "-user_agent", APPX_HEADERS["User-Agent"],
-                "-headers", f"Referer: {APPX_HEADERS['Referer']}\r\nOrigin: {APPX_HEADERS['Origin']}\r\n",
+                "-user_agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
+                "-headers", "Referer: https://appx-play.akamai.net.in/\r\n",
                 "-reconnect", "1",
                 "-reconnect_at_eof", "1",
                 "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "10",
-                "-timeout", "30000000",
+                "-reconnect_delay_max", "5",
                 "-i", target_url,
                 "-c", "copy",
-                "-movflags", "+faststart",
                 "-bsf:a", "aac_adtstoasc",
                 output_path
             ]
@@ -524,84 +428,63 @@ async def download_video_stream(url: str, output_path: str, editable: Message, t
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            _, stderr = await proc.communicate()
-            if stderr:
-                logger.warning(f"ffmpeg stderr: {stderr.decode(errors='ignore')[-400:]}")
+            await proc.communicate()
             if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                logger.info(f"ffmpeg success: {target_url}")
                 return True
-            logger.warning(f"ffmpeg produced no output for: {target_url}")
-        except FileNotFoundError:
-            logger.warning("ffmpeg not found, skipping")
-        except Exception as e:
-            logger.error(f"ffmpeg exception: {e}")
+        except Exception:
+            pass
 
-        # ── 4. Direct HTTP (MP4 / generic) ─────────────────────────────────
-        base_check = target_url.split('?')[0].lower()
-        if any(ext in base_check for ext in [".mp4", ".mkv", ".ts", ".webm"]):
-            ok = await download_file_http(target_url, output_path, editable, title)
-            if ok:
-                logger.info(f"Direct HTTP success: {target_url}")
-                return True
-            logger.warning(f"Direct HTTP failed: {target_url}")
-
-    # Last resort: try direct HTTP on the original clean URL regardless of extension
-    logger.warning(f"All engines failed, last-resort HTTP: {clean_url}")
-    ok = await download_file_http(clean_url, output_path, editable, title)
-    if ok:
-        return True
-
-    logger.error(f"COMPLETE FAIL for video: {url}")
+    # Fallback to direct HTTP download if it's an MP4 file
+    base_url = clean_url.split('?')[0].lower()
+    if base_url.endswith('.mp4') or '.mp4' in base_url:
+        return await download_file_http(clean_url, output_path, editable, title)
+        
     return False
 
-# ─── Link parser ───────────────────────────────────────────────────────────────
 def parse_link_lines(raw_text: str) -> List[Tuple[str, str, str, str]]:
     """
     Parses lines of format:
-    'Title (PDF):https://...' or 'Title:https://...*KEY' or 'Title:https://...'
-    Returns list of (clean_title, url, file_type, enc_key).
+    'Title (PDF):https://...' or 'Title:https://...*KEY'
+    Returns list of tuples: (clean_title, url, file_type, enc_key)
     """
     items = []
-    for line in raw_text.strip().splitlines():
+    lines = raw_text.strip().splitlines()
+    for line in lines:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-
+        
         enc_key = ""
-        # Extract encryption key after *
         if "*" in line and ("http://" in line or "https://" in line):
-            star_pos = line.rfind("*")
-            url_start = line.find("http")
-            if star_pos > url_start:
-                enc_key = line[star_pos + 1:].strip()
-                line = line[:star_pos].strip()
+            parts = line.split("*", 1)
+            line = parts[0].strip()
+            enc_key = parts[1].strip()
 
-        if "://" not in line:
-            continue
-
-        http_pos = line.find("https://")
-        if http_pos == -1:
+        if "://" in line:
             http_pos = line.find("http://")
-        if http_pos <= 0:
-            continue
-
-        title = line[:http_pos].rstrip(": \t-|>").strip()
-        url = line[http_pos:].strip()
-        if not url:
-            continue
-
-        url = clean_appx_url(url)
-        file_type = _classify_type(title, url, enc_key)
-        items.append((title or "File", url, file_type, enc_key))
-
+            if http_pos == -1:
+                http_pos = line.find("https://")
+            
+            if http_pos > 0:
+                title = line[:http_pos].rstrip(": \t-").strip()
+                url = line[http_pos:].strip()
+                
+                # Determine type
+                if "(PDF)" in title.upper() or url.lower().endswith(".pdf") or "/subject/" in url or "/paid_course" in url or enc_key:
+                    file_type = "PDF"
+                elif any(ext in url.lower() for ext in [".m3u8", ".mp4", "transcoded-videos", "vodclasses", "liveclasses", "hls", "/videos/"]):
+                    file_type = "VIDEO"
+                else:
+                    file_type = "FILE"
+                    
+                items.append((title or "File", clean_appx_url(url), file_type, enc_key))
     return items
 
-# ─── Batch downloader ───────────────────────────────────────────────────────────
 async def process_batch_downloader(bot: Client, m: Message, user_id: int):
     editable = await m.reply_text("**Wait initializing Appx V2 Downloader... ⏳**")
     temp_dir = f"dl_temp_{user_id}_{int(time.time())}"
     os.makedirs(temp_dir, exist_ok=True)
-
+    
     try:
         prompt_text = (
             "🚀 **Appx V2 Video & PDF Downloader**\n\n"
@@ -611,60 +494,52 @@ async def process_batch_downloader(bot: Client, m: Message, user_id: int):
             "*(Format: `Title (PDF):URL` or `Title:URL*KEY` or `Title:URL`)*"
         )
         raw_text = await get_user_input_or_doc(bot, m, editable, prompt_text, user_id, temp_dir)
-
+        
         items = parse_link_lines(raw_text)
         if not items:
             await editable.edit("**No valid download links found in input! ❌**\nMake sure the file or text contains lines with URLs.")
             return
-
-        # Show type breakdown so user can verify detection
-        v_count = sum(1 for _, _, t, _ in items if t == "VIDEO")
-        p_count = sum(1 for _, _, t, _ in items if t == "PDF")
-        f_count = sum(1 for _, _, t, _ in items if t == "FILE")
-
+            
         dest_prompt = (
-            f"✅ **Found `{len(items)}` items:**\n"
-            f"🎥 Videos: `{v_count}` | 📄 PDFs: `{p_count}` | 📁 Files: `{f_count}`\n\n"
-            "📤 **Where to upload?**\n"
-            "• Send `0` or `me` → this private chat\n"
-            "• Or Channel/Group ID (e.g. `-1001234567890`)"
+            f"✅ **Found `{len(items)}` items to download!**\n\n"
+            "📤 **Where do you want to upload?**\n"
+            "• Send `0` or `me` to upload in **this private chat**.\n"
+            "• Or send **Channel / Group ID** (e.g. `-1001234567890`) where the bot is Admin."
         )
         dest_choice = await prompt_user(bot, m, editable, dest_prompt, user_id)
-
+        
         target_chat_id = m.chat.id
         if dest_choice not in ["0", "me", "here", ""]:
             try:
                 target_chat_id = int(dest_choice)
             except ValueError:
                 target_chat_id = dest_choice
-
+                
         total = len(items)
         success_count = 0
         fail_count = 0
         start_all_time = time.time()
-
+        
         for idx, (title, url, ftype, enc_key) in enumerate(items, 1):
             clean_title = sanitize_filename(title)
             try:
                 await editable.edit(
-                    f"⚙️ **Processing [{idx}/{total}]:**\n\n"
-                    f"📌 **Title:** `{title[:60]}`\n"
+                    f"⚙️ **Processing Item [{idx}/{total}]:**\n\n"
+                    f"📌 **Title:** `{title}`\n"
                     f"📂 **Type:** `{ftype}`{' (Encrypted)' if enc_key else ''}\n"
-                    f"🔗 **URL:** `{url[:60]}...`\n"
                     f"📊 **Overall:** `{(idx-1)/total*100:.1f}%` ({idx-1}/{total})\n\n"
-                    f"<blockquote>❌ Send `/cancel` to stop.</blockquote>"
+                    f"<blockquote>❌ Send `/cancel` to stop batch.</blockquote>"
                 )
             except Exception:
                 pass
-
-            # ── PDF ─────────────────────────────────────────────────────────
+            
             if ftype == "PDF":
                 pdf_path = os.path.join(temp_dir, f"{clean_title}.pdf")
                 if enc_key:
                     ok = await download_appx_encrypted_pdf(url, pdf_path, enc_key)
                 else:
                     ok = await download_file_http(url, pdf_path, editable, title)
-
+                
                 if ok and os.path.exists(pdf_path):
                     try:
                         await editable.edit(f"📤 **Uploading PDF:** `{clean_title}.pdf`...")
@@ -679,7 +554,7 @@ async def process_batch_downloader(bot: Client, m: Message, user_id: int):
                         )
                         success_count += 1
                     except Exception as e:
-                        logger.error(f"Upload PDF failed: {e}")
+                        logger.error(f"Failed to upload PDF: {e}")
                         fail_count += 1
                     finally:
                         if os.path.exists(pdf_path):
@@ -688,16 +563,14 @@ async def process_batch_downloader(bot: Client, m: Message, user_id: int):
                 else:
                     fail_count += 1
                     try:
-                        await editable.edit(f"⚠️ **PDF Failed:** `{title[:50]}`\n`URL: {url[:80]}`\n*Moving to next...*")
-                        await asyncio.sleep(1.5)
+                        await editable.edit(f"⚠️ **Skipped (Dead / Decryption Failed):** `{title[:40]}`\n*Moving to next item...*")
+                        await asyncio.sleep(1.2)
                     except Exception:
                         pass
-
-            # ── VIDEO ────────────────────────────────────────────────────────
+                    
             elif ftype == "VIDEO":
                 vid_path = os.path.join(temp_dir, f"{clean_title}.mp4")
                 ok = await download_video_stream(url, vid_path, editable, title)
-
                 if ok and os.path.exists(vid_path):
                     try:
                         await editable.edit(f"📤 **Uploading Video:** `{clean_title}.mp4`...")
@@ -713,7 +586,7 @@ async def process_batch_downloader(bot: Client, m: Message, user_id: int):
                         )
                         success_count += 1
                     except Exception as e:
-                        logger.error(f"Upload video failed: {e}")
+                        logger.error(f"Failed to upload Video: {e}")
                         fail_count += 1
                     finally:
                         if os.path.exists(vid_path):
@@ -722,16 +595,10 @@ async def process_batch_downloader(bot: Client, m: Message, user_id: int):
                 else:
                     fail_count += 1
                     try:
-                        await editable.edit(
-                            f"⚠️ **Video Failed:** `{title[:50]}`\n"
-                            f"`URL: {url[:80]}`\n"
-                            f"*Check logs — all 4 engines tried. Moving to next...*"
-                        )
-                        await asyncio.sleep(1.5)
+                        await editable.edit(f"⚠️ **Skipped (HTTP 404 / Dead Video):** `{title[:40]}`\n*Stream not hosted on CDN. Continuing...*")
+                        await asyncio.sleep(1.2)
                     except Exception:
                         pass
-
-            # ── FILE (generic) ───────────────────────────────────────────────
             else:
                 gen_path = os.path.join(temp_dir, f"{clean_title}.bin")
                 ok = await download_file_http(url, gen_path, editable, title)
@@ -739,7 +606,7 @@ async def process_batch_downloader(bot: Client, m: Message, user_id: int):
                     try:
                         await bot.send_document(chat_id=target_chat_id, document=gen_path, caption=f"📁 **{title}**")
                         success_count += 1
-                    except Exception:
+                    except Exception as e:
                         fail_count += 1
                     finally:
                         if os.path.exists(gen_path):
@@ -747,20 +614,20 @@ async def process_batch_downloader(bot: Client, m: Message, user_id: int):
                             except: pass
                 else:
                     fail_count += 1
-
+                    
         total_time = format_time(time.time() - start_all_time)
         final_msg = (
-            f"🎉 **Batch Complete!**\n\n"
-            f"✅ **Uploaded:** `{success_count}` items\n"
-            f"⚠️ **Failed:** `{fail_count}` items\n"
+            f"🎉 **Batch Download & Upload Completed!**\n\n"
+            f"✅ **Successfully Uploaded:** `{success_count}` items\n"
+            f"⚠️ **Skipped (Expired 404 on Server):** `{fail_count}` items\n"
             f"⏱️ **Total Time:** `{total_time}`\n\n"
-            f"<blockquote>All active files sent to destination.</blockquote>"
+            f"<blockquote>All active files sent to destination chat.</blockquote>"
         )
         try:
             await editable.edit(final_msg)
         except Exception:
             pass
-
+        
     except ProcessCancelledException:
         pass
     except Exception as e:

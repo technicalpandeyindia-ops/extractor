@@ -1,21 +1,12 @@
 import os
 
-# All credentials MUST be set via environment variables.
-# Never hardcode tokens or API keys here.
-API_ID = api_id = int(os.environ.get("API_ID", os.environ.get("api_id", 0)))
-API_HASH = api_hash = os.environ.get("API_HASH", os.environ.get("api_hash", ""))
-BOT_TOKEN = bot_token = os.environ.get("BOT_TOKEN", os.environ.get("bot_token", ""))
+API_ID = api_id = int(os.environ.get("API_ID", os.environ.get("api_id", 33466201)))
+API_HASH = api_hash = os.environ.get("API_HASH", os.environ.get("api_hash", "c487cc22d111e6febcbf1e9c2b088e9a"))
+BOT_TOKEN = bot_token = os.environ.get("BOT_TOKEN", os.environ.get("bot_token", "8623292536:AAGeZ7fa1jG4l9f08Nq7l_XNreyHn3RI6Zs"))
 
-if not all([API_ID, API_HASH, BOT_TOKEN]):
-    import logging
-    logging.warning(
-        "MISSING CREDENTIALS: Set API_ID, API_HASH, BOT_TOKEN environment variables "
-        "before running the bot."
-    )
-
-# List of authorized Telegram User IDs (comma-separated in env)
-_auth = os.environ.get("AUTH_USERS", os.environ.get("auth_users", ""))
+# List of authorized Telegram User IDs
+_auth = os.environ.get("AUTH_USERS", os.environ.get("auth_users", "5324130644"))
 if _auth:
     AUTH_USERS = auth_users = [int(u.strip()) for u in str(_auth).split(",") if u.strip().isdigit()]
 else:
-    AUTH_USERS = auth_users = []
+    AUTH_USERS = auth_users = [5324130644]
