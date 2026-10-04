@@ -1458,3 +1458,5 @@ def register_pwwp_handlers(bot: Client):
                 user_id
             )
         )
+
+process_pw = process_pwwp

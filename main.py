@@ -1,4 +1,3 @@
-# language: Python, file: main.py, target: Linux / Windows / Render, Python 3.10-3.14
 import asyncio
 import logging
 import os
@@ -6,15 +5,12 @@ import sys
 import threading
 import time
 
-# Initialize asyncio event loop immediately before any pyrogram imports
+# Initialize asyncio event loop for Python 3.10+ / 3.12+ / 3.14+ compatibility
 try:
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    asyncio.get_event_loop()
 except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)
 
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
@@ -53,126 +49,195 @@ def _patched_count_populated(self):
 _pti.Identifier.matches = _patched_matches
 _pti.Identifier.count_populated = _patched_count_populated
 
-from config import API_ID, API_HASH, BOT_TOKEN, auth_users
+import config
+api_id = getattr(config, "api_id", getattr(config, "API_ID", 33466201))
+api_hash = getattr(config, "api_hash", getattr(config, "API_HASH", "c487cc22d111e6febcbf1e9c2b088e9a"))
+bot_token = getattr(config, "bot_token", getattr(config, "BOT_TOKEN", "8623292536:AAGeZ7fa1jG4l9f08Nq7l_XNreyHn3RI6Zs"))
 from helpers import is_authorized
-from one import process_pw
-from two import process_cp
-from three import process_appxwp
+from one import register_pwwp_handlers
+from two import register_cpwp_handlers
+from three import register_appxwp_handlers
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("ExtBot")
-
-bot = Client(
-    "bot_session",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    in_memory=True
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-active_tasks = {}
-
-def start_health_server():
-    """Runs a tiny standalone HTTP server in the background for Render/Railway 24/7 pings."""
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    start_time = time.time()
+    logging.info(f"Starting KeepAlive Web Server on 0.0.0.0:{port}...")
+    
     try:
-        from flask import Flask
-        app = Flask("HealthServer")
+        from flask import Flask, jsonify
+        app = Flask(__name__)
+
+        # Disable werkzeug access logs to keep terminal clean
+        log = logging.getLogger('werkzeug')
+        log.setLevel(logging.ERROR)
 
         @app.route("/")
-        @app.route("/health")
         def health():
-            return "Bot is running 24/7!", 200
+            uptime_sec = int(time.time() - start_time)
+            mins, secs = divmod(uptime_sec, 60)
+            hrs, mins = divmod(mins, 60)
+            days, hrs = divmod(hrs, 24)
+            return jsonify({
+                "status": "online",
+                "service": "Zx Extractor Bot",
+                "uptime": f"{days}d {hrs}h {mins}m {secs}s",
+                "uptime_seconds": uptime_sec
+            }), 200
 
-        port = int(os.environ.get("PORT", 8080))
-        threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False), daemon=True).start()
-        logger.info(f"Health check server active on port {port}")
+        @app.route("/ping")
+        def ping():
+            return "pong", 200
+
+        logging.info(f"Flask Web Server successfully bound to port {port}")
+        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     except Exception as e:
-        logger.warning(f"Failed to start health server: {e}")
+        logging.error(f"Flask runner error: {e}, falling back to builtin http.server")
+        import http.server
+        import socketserver
 
-@bot.on_message(filters.command(["start", "help"]) & filters.private)
-async def start_handler(client: Client, message: Message):
-    user_id = message.from_user.id if message.from_user else message.chat.id
+        class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status": "online", "message": "Bot running OK"}')
+
+            def log_message(self, format, *args):
+                pass
+
+        try:
+            socketserver.TCPServer.allow_reuse_address = True
+            with socketserver.TCPServer(("0.0.0.0", port), HealthCheckHandler) as httpd:
+                logging.info(f"Built-in HTTP server listening on 0.0.0.0:{port}")
+                httpd.serve_forever()
+        except Exception as server_err:
+            logging.error(f"Critical Web server error: {server_err}")
+
+def run_self_pinger():
+    """Pings own service URL periodically to prevent Render / Railway free tier sleep."""
+    import urllib.request
+    
+    # Wait for web server to spin up
+    time.sleep(15)
+    
+    app_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("RAILWAY_STATIC_URL") or os.environ.get("APP_URL")
+    if app_url:
+        if not app_url.startswith("http"):
+            app_url = f"https://{app_url}"
+        logging.info(f"Uptime KeepAlive Self-Pinger active for: {app_url}")
+        
+        while True:
+            try:
+                req = urllib.request.Request(f"{app_url.rstrip('/')}/ping", headers={"User-Agent": "UptimeKeepAlive/1.0"})
+                with urllib.request.urlopen(req, timeout=15) as res:
+                    logging.info(f"Self-ping successful: HTTP {res.status}")
+            except Exception as e:
+                logging.warning(f"Self-ping notice: {e}")
+            # Ping every 10 minutes (600s) before Render's 15-min idle sleep
+            time.sleep(600)
+
+threading.Thread(target=run_web, daemon=True).start()
+threading.Thread(target=run_self_pinger, daemon=True).start()
+
+bot = Client(
+    "techvjbot",
+    in_memory=True,
+    api_id=api_id,
+    api_hash=api_hash,
+    bot_token=bot_token
+)
+
+START_IMAGE = "https://files.catbox.moe/vg3vae.jpg"
+
+START_CAPTION = (
+    "<blockquote>\n"
+    "╭━━━ ✦ <b>Zx Extractor</b> ✦ ━━━╮\n\n"
+    "⚡ <b>Your Content. One Extractor.</b>\n"
+    "🔐 <b>Smart • Reliable • Efficient</b>\n"
+    "📚 <b>PW • Classplus • Appx</b>\n\n"
+    "<i>Select a platform to begin...</i>\n"
+    "╰━━━━━━━━━━━━━━━━━━━━╯\n"
+    "</blockquote>"
+)
+
+START_KEYBOARD = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton(
+            "👨‍💻 𝗗𝗲𝘃𝗲𝗹𝗼𝗽𝗲𝗿 🇮🇳",
+            url="https://t.me/SumitTripathi"
+        )
+    ],
+    [
+        InlineKeyboardButton(
+            "🚀 𝗣𝗵𝘆𝘀𝗶𝗰𝘀 𝗪𝗮𝗹𝗹𝗮𝗵 🚀",
+            callback_data="pwwp"
+        )
+    ],
+    [
+        InlineKeyboardButton(
+            "📘 𝗖𝗹𝗮𝘀𝘀𝗽𝗹𝘂𝘀 📘",
+            callback_data="cpwp"
+        )
+    ],
+    [
+        InlineKeyboardButton(
+            "📒 𝗔𝗽𝗽𝘅 📒",
+            callback_data="appxwp"
+        )
+    ]
+])
+
+@bot.on_message(filters.command(["start"]))
+async def start(client: Client, message: Message):
+    user_id = message.from_user.id if message.from_user else 0
+    logging.info(f"Incoming /start command from user_id: {user_id} (@{message.from_user.username if message.from_user else 'unknown'})")
     if not is_authorized(user_id):
-        await message.reply_text("⛔ **Access Denied!** You are not authorized to use this bot.")
+        logging.warning(f"User {user_id} rejected: Not in authorized users list.")
+        await message.reply_text(f"⛔ **Access Denied:** Your User ID (`{user_id}`) is not authorized to use this bot.")
         return
+    try:
+        await message.reply_photo(
+            photo=START_IMAGE,
+            caption=START_CAPTION,
+            reply_markup=START_KEYBOARD,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e1:
+        logging.warning(f"Failed to send start photo: {e1}, attempting text-only fallback...")
+        try:
+            await message.reply_text(
+                text=START_CAPTION,
+                reply_markup=START_KEYBOARD,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e2:
+            logging.error(f"Failed to send HTML start message: {e2}, sending plain text...")
+            await message.reply_text(
+                text="⚡ **Zx Extractor**\n\nSelect a platform below to begin:",
+                reply_markup=START_KEYBOARD
+            )
 
-    welcome_text = (
-        "👋 **Welcome to All-In-One Course Extractor Bot!**\n\n"
-        "⚡ **Supported Platforms:**\n"
-        "1️⃣ **Physics Wallah (PW)** — Batches, Videos & Notes\n"
-        "2️⃣ **Classplus (CP)** — Master OTP/Token/Sub Extraction\n"
-        "3️⃣ **Appx / Akamai / Classx** — Credential/JWT Token Course Extractor\n\n"
-        "👇 **Select a platform below to begin:**"
+
+@bot.on_message(filters.command(["help"]))
+async def help_cmd(client: Client, message: Message):
+    user_id = message.from_user.id if message.from_user else 0
+    if not is_authorized(user_id):
+        await message.reply_text("⛔ **Access Denied.**")
+        return
+    await message.reply_text(
+        "✦ <b>Zx Extractor</b>\n\n"
+        "Use /start to open the extractor menu and select your provider.",
+        parse_mode=ParseMode.HTML
     )
 
-    buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣ Physics Wallah", callback_data="ext_pw")],
-        [InlineKeyboardButton("2️⃣ Classplus", callback_data="ext_cp")],
-        [InlineKeyboardButton("3️⃣ Appx / Akamai", callback_data="ext_appx")],
-        [InlineKeyboardButton("❌ Cancel Active Process", callback_data="ext_cancel")]
-    ])
-    await message.reply_text(welcome_text, reply_markup=buttons)
-
-@bot.on_message(filters.command("cancel") & filters.private)
-async def cancel_handler(client: Client, message: Message):
-    user_id = message.from_user.id if message.from_user else message.chat.id
-    if user_id in active_tasks:
-        task = active_tasks.pop(user_id)
-        task.cancel()
-        await message.reply_text("🛑 **Active extraction process cancelled successfully.**")
-    else:
-        await message.reply_text("ℹ️ **No active extraction process running.**")
-
-@bot.on_callback_query()
-async def callback_handler(client: Client, query):
-    user_id = query.from_user.id
-    if not is_authorized(user_id):
-        await query.answer("⛔ Access Denied!", show_alert=True)
-        return
-
-    data = query.data
-
-    if data == "ext_cancel":
-        if user_id in active_tasks:
-            task = active_tasks.pop(user_id)
-            task.cancel()
-            await query.message.edit_text("🛑 **Process cancelled.**")
-        else:
-            await query.answer("No active process to cancel.", show_alert=True)
-        return
-
-    if user_id in active_tasks and not active_tasks[user_id].done():
-        await query.answer("⚠️ You already have an active extraction in progress! Send /cancel to restart.", show_alert=True)
-        return
-
-    await query.answer()
-
-    if data == "ext_pw":
-        task = asyncio.create_task(process_pw(client, query.message, user_id))
-        active_tasks[user_id] = task
-    elif data == "ext_cp":
-        task = asyncio.create_task(process_cp(client, query.message, user_id))
-        active_tasks[user_id] = task
-    elif data == "ext_appx":
-        task = asyncio.create_task(process_appxwp(client, query.message, user_id))
-        active_tasks[user_id] = task
-
-async def main():
-    start_health_server()
-    logger.info("Starting Telegram Bot...")
-    await bot.start()
-    me = await bot.get_me()
-    logger.info(f"Bot started successfully as @{me.username} [{me.id}]")
-    
-    # Run forever
-    while True:
-        await asyncio.sleep(3600)
+register_pwwp_handlers(bot)
+register_cpwp_handlers(bot)
+register_appxwp_handlers(bot)
 
 if __name__ == "__main__":
-    try:
-        loop.run_until_complete(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")
+    bot.run()

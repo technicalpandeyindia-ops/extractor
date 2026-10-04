@@ -1,12 +1,52 @@
+import asyncio
 import logging
 import re
 from base64 import b64decode
 from typing import Dict, Optional
+
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)
+
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyromod.exceptions import ListenerTimeout
+import pyromod.types.identifier as _pti
+
+# Python 3.14 PEP 649 compatibility patch for pyromod Identifier
+def _patched_matches(self, update: "_pti.Identifier") -> bool:
+    fields = getattr(self, '__annotations__', None) or getattr(type(self), '__annotations__', None) or ['inline_message_id', 'chat_id', 'message_id', 'from_user_id']
+    for field in fields:
+        pattern_value = getattr(self, field)
+        update_value = getattr(update, field)
+        if pattern_value is not None:
+            if isinstance(update_value, list):
+                if isinstance(pattern_value, list):
+                    if not set(update_value).intersection(set(pattern_value)):
+                        return False
+                elif pattern_value not in update_value:
+                    return False
+            elif isinstance(pattern_value, list):
+                if update_value not in pattern_value:
+                    return False
+            elif update_value != pattern_value:
+                return False
+    return True
+
+def _patched_count_populated(self):
+    non_null_count = 0
+    fields = getattr(self, '__annotations__', None) or getattr(type(self), '__annotations__', None) or ['inline_message_id', 'chat_id', 'message_id', 'from_user_id']
+    for attr in fields:
+        if getattr(self, attr) is not None:
+            non_null_count += 1
+    return non_null_count
+
+_pti.Identifier.matches = _patched_matches
+_pti.Identifier.count_populated = _patched_count_populated
 
 try:
     from config import auth_users
@@ -46,15 +86,32 @@ async def ask_user(bot: Client, m: Message, editable: Message, text: str, user_i
         return None
 
 def clean_appx_url(url: str) -> str:
-    """Normalizes Appx / Classx CDN URLs and strips expired CloudFront signatures."""
+    """Normalizes Appx / Classx CDN URLs, converts live stream IDs to permanent VOD playlist_eof, and strips expired signatures."""
     if not url:
         return ""
     url = str(url).strip()
-    if "appx.co.in" in url:
+    
+    # Handle static assets & PDF rewrites
+    if "appx.co.in" in url and ("subject/" in url or "paid_course" in url or "image/" in url or url.endswith(".pdf")):
         url = re.sub(r"https?://[^/]+\.appx\.co\.in", "https://appx-content-v2.classx.co.in", url)
         if "?" in url and any(param in url for param in ("URLPrefix=", "Expires=", "KeyName=", "Signature=")):
             url = url.split("?")[0]
+            
+    # Handle vodclasses & live stream conversions
+    # Convert ANY liveclasses / expired live link containing stream ID T_\d+ to permanent VOD playlist_eof
+    if "liveclasses" in url or ("classx.co.in" in url and "/live/" in url):
+        match = re.search(r'/(T_\d+|\d+)/', url) or re.search(r'(T_\d+)', url)
+        if match:
+            stream_id = match.group(1)
+            url = f"https://vodclasses.classx.co.in/live/{stream_id}/playlist_eof.m3u8"
+                
+    if "vodclasses.classx.co.in" in url:
+        # Strip query parameters from vodclasses playlist_eof for clean, permanent download/playback
+        if "?" in url:
+            url = url.split("?")[0]
+
     return url
+
 
 def extract_url_from_video_details(item: Dict) -> str:
     if not isinstance(item, dict):

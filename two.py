@@ -523,3 +523,5 @@ def register_cpwp_handlers(bot: Client):
             return
         await callback_query.answer()
         asyncio.create_task(process_cpwp(client, callback_query.message, user_id))
+
+process_cp = process_cpwp
